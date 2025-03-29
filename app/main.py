@@ -5,12 +5,99 @@ from typing import List, Dict, Any, Optional
 import json
 import time
 import os
+import glob
+import random
 import google.auth
 from google.oauth2 import service_account
 from vertexai.preview.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold, SafetySetting
 import vertexai
 
 app = FastAPI(title="OpenAI to Gemini Adapter")
+
+# Credential Manager for handling multiple service accounts
+class CredentialManager:
+    def __init__(self, default_credentials_dir="/app/credentials"):
+        # Use environment variable if set, otherwise use default
+        self.credentials_dir = os.environ.get("CREDENTIALS_DIR", default_credentials_dir)
+        self.credentials_files = []
+        self.current_index = 0
+        self.credentials = None
+        self.project_id = None
+        self.load_credentials_list()
+    
+    def load_credentials_list(self):
+        """Load the list of available credential files"""
+        # Look for all .json files in the credentials directory
+        pattern = os.path.join(self.credentials_dir, "*.json")
+        self.credentials_files = glob.glob(pattern)
+        
+        if not self.credentials_files:
+            print(f"No credential files found in {self.credentials_dir}")
+            return False
+        
+        print(f"Found {len(self.credentials_files)} credential files: {[os.path.basename(f) for f in self.credentials_files]}")
+        return True
+    
+    def refresh_credentials_list(self):
+        """Refresh the list of credential files (useful if files are added/removed)"""
+        old_count = len(self.credentials_files)
+        self.load_credentials_list()
+        new_count = len(self.credentials_files)
+        
+        if old_count != new_count:
+            print(f"Credential files updated: {old_count} -> {new_count}")
+        
+        return len(self.credentials_files) > 0
+    
+    def get_next_credentials(self):
+        """Rotate to the next credential file and load it"""
+        if not self.credentials_files:
+            return None, None
+        
+        # Get the next credential file in rotation
+        file_path = self.credentials_files[self.current_index]
+        self.current_index = (self.current_index + 1) % len(self.credentials_files)
+        
+        try:
+            credentials = service_account.Credentials.from_service_account_file(file_path)
+            project_id = credentials.project_id
+            print(f"Loaded credentials from {file_path} for project: {project_id}")
+            self.credentials = credentials
+            self.project_id = project_id
+            return credentials, project_id
+        except Exception as e:
+            print(f"Error loading credentials from {file_path}: {e}")
+            # Try the next file if this one fails
+            if len(self.credentials_files) > 1:
+                print("Trying next credential file...")
+                return self.get_next_credentials()
+            return None, None
+    
+    def get_random_credentials(self):
+        """Get a random credential file and load it"""
+        if not self.credentials_files:
+            return None, None
+        
+        # Choose a random credential file
+        file_path = random.choice(self.credentials_files)
+        
+        try:
+            credentials = service_account.Credentials.from_service_account_file(file_path)
+            project_id = credentials.project_id
+            print(f"Loaded credentials from {file_path} for project: {project_id}")
+            self.credentials = credentials
+            self.project_id = project_id
+            return credentials, project_id
+        except Exception as e:
+            print(f"Error loading credentials from {file_path}: {e}")
+            # Try another random file if this one fails
+            if len(self.credentials_files) > 1:
+                print("Trying another credential file...")
+                return self.get_random_credentials()
+            return None, None
+
+# Initialize the credential manager
+credential_manager = CredentialManager()
 
 # Define data models
 class OpenAIMessage(BaseModel):
@@ -26,20 +113,34 @@ class OpenAIRequest(BaseModel):
     top_k: Optional[int] = None
     stream: Optional[bool] = False
     stop: Optional[List[str]] = None
+    presence_penalty: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+    seed: Optional[int] = None
+    logprobs: Optional[int] = None
+    response_logprobs: Optional[bool] = None
+    n: Optional[int] = None  # Maps to candidate_count in Vertex AI
 
 # Configure authentication
 def init_vertex_ai():
     try:
-        # Check for file path credentials
+        # First try to use the credential manager to get credentials
+        credentials, project_id = credential_manager.get_next_credentials()
+        
+        if credentials and project_id:
+            vertexai.init(credentials=credentials, project=project_id, location="us-central1")
+            print(f"Initialized Vertex AI with project: {project_id}")
+            return True
+        
+        # Fall back to environment variable if credential manager fails
         file_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
         if file_path and os.path.exists(file_path):
             credentials = service_account.Credentials.from_service_account_file(file_path)
             project_id = credentials.project_id
             vertexai.init(credentials=credentials, project=project_id, location="us-central1")
-            print(f"Initialized Vertex AI with project: {project_id}")
+            print(f"Initialized Vertex AI with project: {project_id} (using GOOGLE_APPLICATION_CREDENTIALS)")
             return True
         else:
-            print(f"Error: GOOGLE_APPLICATION_CREDENTIALS file not found at {file_path}")
+            print(f"Error: No valid credentials found. GOOGLE_APPLICATION_CREDENTIALS file not found at {file_path}")
             return False
     except Exception as e:
         print(f"Error initializing authentication: {e}")
@@ -85,6 +186,7 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> str:
 def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     config = {}
     
+    # Basic parameters that were already supported
     if request.temperature is not None:
         config["temperature"] = request.temperature
     
@@ -100,16 +202,45 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     if request.stop is not None:
         config["stop_sequences"] = request.stop
     
+    # Additional parameters with direct mappings
+    if request.presence_penalty is not None:
+        config["presence_penalty"] = request.presence_penalty
+    
+    if request.frequency_penalty is not None:
+        config["frequency_penalty"] = request.frequency_penalty
+    
+    if request.seed is not None:
+        config["seed"] = request.seed
+    
+    if request.logprobs is not None:
+        config["logprobs"] = request.logprobs
+    
+    if request.response_logprobs is not None:
+        config["response_logprobs"] = request.response_logprobs
+    
+    # Map OpenAI's 'n' parameter to Vertex AI's 'candidate_count'
+    if request.n is not None:
+        config["candidate_count"] = request.n
+    
     return config
 
 # Response format conversion
 def convert_to_openai_format(gemini_response, model: str) -> Dict[str, Any]:
-    return {
-        "id": f"chatcmpl-{int(time.time())}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [
+    # Handle multiple candidates if present
+    if hasattr(gemini_response, 'candidates') and len(gemini_response.candidates) > 1:
+        choices = []
+        for i, candidate in enumerate(gemini_response.candidates):
+            choices.append({
+                "index": i,
+                "message": {
+                    "role": "assistant",
+                    "content": candidate.text
+                },
+                "finish_reason": "stop"
+            })
+    else:
+        # Handle single response (backward compatibility)
+        choices = [
             {
                 "index": 0,
                 "message": {
@@ -118,7 +249,21 @@ def convert_to_openai_format(gemini_response, model: str) -> Dict[str, Any]:
                 },
                 "finish_reason": "stop"
             }
-        ],
+        ]
+    
+    # Include logprobs if available
+    for i, choice in enumerate(choices):
+        if hasattr(gemini_response, 'candidates') and i < len(gemini_response.candidates):
+            candidate = gemini_response.candidates[i]
+            if hasattr(candidate, 'logprobs'):
+                choice["logprobs"] = candidate.logprobs
+    
+    return {
+        "id": f"chatcmpl-{int(time.time())}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": choices,
         "usage": {
             "prompt_tokens": 0,  # Would need token counting logic
             "completion_tokens": 0,
@@ -126,7 +271,7 @@ def convert_to_openai_format(gemini_response, model: str) -> Dict[str, Any]:
         }
     }
 
-def convert_chunk_to_openai(chunk, model: str, response_id: str) -> str:
+def convert_chunk_to_openai(chunk, model: str, response_id: str, candidate_index: int = 0) -> str:
     chunk_content = chunk.text if hasattr(chunk, 'text') else ""
     
     chunk_data = {
@@ -136,7 +281,7 @@ def convert_chunk_to_openai(chunk, model: str, response_id: str) -> str:
         "model": model,
         "choices": [
             {
-                "index": 0,
+                "index": candidate_index,
                 "delta": {
                     "content": chunk_content
                 },
@@ -145,21 +290,27 @@ def convert_chunk_to_openai(chunk, model: str, response_id: str) -> str:
         ]
     }
     
+    # Add logprobs if available
+    if hasattr(chunk, 'logprobs'):
+        chunk_data["choices"][0]["logprobs"] = chunk.logprobs
+    
     return f"data: {json.dumps(chunk_data)}\n\n"
 
-def create_final_chunk(model: str, response_id: str) -> str:
+def create_final_chunk(model: str, response_id: str, candidate_count: int = 1) -> str:
+    choices = []
+    for i in range(candidate_count):
+        choices.append({
+            "index": i,
+            "delta": {},
+            "finish_reason": "stop"
+        })
+    
     final_chunk = {
         "id": response_id,
         "object": "chat.completion.chunk",
         "created": int(time.time()),
         "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop"
-            }
-        ]
+        "choices": choices
     }
     
     return f"data: {json.dumps(final_chunk)}\n\n"
@@ -264,41 +415,66 @@ async def list_models():
     return {"object": "list", "data": models}
 
 # Main chat completion endpoint
+# OpenAI-compatible error response
+def create_openai_error_response(status_code: int, message: str, error_type: str) -> Dict[str, Any]:
+    return {
+        "error": {
+            "message": message,
+            "type": error_type,
+            "code": status_code,
+            "param": None,
+        }
+    }
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: OpenAIRequest):
     try:
+        # Validate model availability
+        if not request.model or not any(model["id"] == request.model for model in list_models().get("data", [])):
+            error_response = create_openai_error_response(
+                400, f"Model '{request.model}' not found", "invalid_request_error"
+            )
+            return JSONResponse(status_code=400, content=error_response)
+        
         # Use the model name directly as provided
         gemini_model = request.model
         
         # Create generation config
         generation_config = create_generation_config(request)
         
+        # Get fresh credentials for this request
+        credentials, project_id = credential_manager.get_next_credentials()
+        
+        if not credentials or not project_id:
+            error_response = create_openai_error_response(
+                500, "Failed to obtain valid credentials", "server_error"
+            )
+            return JSONResponse(status_code=500, content=error_response)
+        
+        # Initialize Vertex AI with the rotated credentials
+        try:
+            vertexai.init(credentials=credentials, project=project_id, location="us-central1")
+            print(f"Using credentials for project: {project_id}")
+        except Exception as auth_error:
+            error_response = create_openai_error_response(
+                500, f"Failed to initialize authentication: {str(auth_error)}", "server_error"
+            )
+            return JSONResponse(status_code=500, content=error_response)
+        
         # Initialize Gemini model
-        model = GenerativeModel(gemini_model)
+        try:
+            model = GenerativeModel(gemini_model)
+        except Exception as model_error:
+            error_response = create_openai_error_response(
+                400, f"Failed to initialize model '{gemini_model}': {str(model_error)}", "invalid_request_error"
+            )
+            return JSONResponse(status_code=400, content=error_response)
 
-        # safety_settings = [
-        #     {
-        #         "category": HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        #         "threshold": HarmBlockThreshold.BLOCK_NONE
-        #     },
-        #     {
-        #         "category": HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        #         "threshold": HarmBlockThreshold.BLOCK_NONE
-        #     },
-        #     {
-        #         "category": HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        #         "threshold": HarmBlockThreshold.BLOCK_NONE
-        #     },
-        #     {
-        #         "category": HarmCategory.HARM_CATEGORY_HARASSMENT,
-        #         "threshold": HarmBlockThreshold.BLOCK_NONE
-        #     }
-        # ]
         safety_settings = [
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,threshold=HarmBlockThreshold.BLOCK_NONE),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,threshold=HarmBlockThreshold.BLOCK_NONE),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,threshold=HarmBlockThreshold.BLOCK_NONE),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT,threshold=HarmBlockThreshold.BLOCK_NONE)
+            SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,threshold=HarmBlockThreshold.OFF),
+            SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,threshold=HarmBlockThreshold.OFF),
+            SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,threshold=HarmBlockThreshold.OFF),
+            SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT,threshold=HarmBlockThreshold.OFF)
         ]
                 
         # Create prompt from messages
@@ -306,28 +482,37 @@ async def chat_completions(request: OpenAIRequest):
         
         if request.stream:
             # Handle streaming response
-            def stream_generator():
+            async def stream_generator():
                 response_id = f"chatcmpl-{int(time.time())}"
-
-                print("aaaaa")
+                candidate_count = request.n or 1
                 
-                # Generate content with streaming
-                responses = model.generate_content(
-                    prompt,
-                    generation_config=generation_config,
-                    safety_settings=safety_settings,
-                    stream=True
-                )
-
-                print("bbbbb")
+                try:
+                    # For streaming, we can only handle one candidate at a time
+                    # If multiple candidates are requested, we'll generate them sequentially
+                    for candidate_index in range(candidate_count):
+                        # Generate content with streaming
+                        responses = model.generate_content(
+                            prompt,
+                            generation_config=generation_config,
+                            safety_settings=safety_settings,
+                            stream=True
+                        )
+                        
+                        # Convert and yield each chunk
+                        for response in responses:
+                            yield convert_chunk_to_openai(response, request.model, response_id, candidate_index)
+                    
+                    # Send final chunk with all candidates
+                    yield create_final_chunk(request.model, response_id, candidate_count)
+                    yield "data: [DONE]\n\n"
                 
-                # Convert and yield each chunk
-                for response in responses:
-                    yield convert_chunk_to_openai(response, request.model, response_id)
-                
-                # Send final chunk
-                yield create_final_chunk(request.model, response_id)
-                yield "data: [DONE]\n\n"
+                except Exception as stream_error:
+                    # Format streaming errors in SSE format
+                    error_msg = f"Error during streaming: {str(stream_error)}"
+                    print(error_msg)
+                    error_response = create_openai_error_response(500, error_msg, "server_error")
+                    yield f"data: {json.dumps(error_response)}\n\n"
+                    yield "data: [DONE]\n\n"
             
             return StreamingResponse(
                 stream_generator(),
@@ -335,23 +520,44 @@ async def chat_completions(request: OpenAIRequest):
             )
         else:
             # Handle non-streaming response
-            response = model.generate_content(
-                prompt,
-                safety_settings=safety_settings,
-                generation_config=generation_config
-            )
-            
-            openai_response = convert_to_openai_format(response, request.model)
-            return JSONResponse(content=openai_response)
+            try:
+                # If multiple candidates are requested, set candidate_count
+                if request.n and request.n > 1:
+                    # Make sure generation_config has candidate_count set
+                    if "candidate_count" not in generation_config:
+                        generation_config["candidate_count"] = request.n
+                
+                response = model.generate_content(
+                    prompt,
+                    safety_settings=safety_settings,
+                    generation_config=generation_config
+                )
+                
+                openai_response = convert_to_openai_format(response, request.model)
+                return JSONResponse(content=openai_response)
+            except Exception as generate_error:
+                error_msg = f"Error generating content: {str(generate_error)}"
+                print(error_msg)
+                error_response = create_openai_error_response(500, error_msg, "server_error")
+                return JSONResponse(status_code=500, content=error_response)
     
     except Exception as e:
-        print(f"Error processing request: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing request: {str(e)}"
-        )
+        error_msg = f"Error processing request: {str(e)}"
+        print(error_msg)
+        error_response = create_openai_error_response(500, error_msg, "server_error")
+        return JSONResponse(status_code=500, content=error_response)
 
 # Health check endpoint
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    # Refresh the credentials list to get the latest status
+    credential_manager.refresh_credentials_list()
+    
+    return {
+        "status": "ok",
+        "credentials": {
+            "available": len(credential_manager.credentials_files),
+            "files": [os.path.basename(f) for f in credential_manager.credentials_files],
+            "current_index": credential_manager.current_index
+        }
+    }
