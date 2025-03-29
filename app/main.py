@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import json
@@ -11,8 +12,39 @@ import google.auth
 from google.oauth2 import service_account
 from vertexai.preview.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold, SafetySetting
 import vertexai
+import config
 
 app = FastAPI(title="OpenAI to Gemini Adapter")
+
+# API Key security scheme
+api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
+
+# Dependency for API key validation
+async def get_api_key(authorization: Optional[str] = Header(None)):
+    if authorization is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing API key. Please include 'Authorization: Bearer YOUR_API_KEY' header."
+        )
+    
+    # Check if the header starts with "Bearer "
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key format. Use 'Authorization: Bearer YOUR_API_KEY'"
+        )
+    
+    # Extract the API key
+    api_key = authorization.replace("Bearer ", "")
+    
+    # Validate the API key
+    if not config.validate_api_key(api_key):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key"
+        )
+    
+    return api_key
 
 # Credential Manager for handling multiple service accounts
 class CredentialManager:
@@ -317,7 +349,7 @@ def create_final_chunk(model: str, response_id: str, candidate_count: int = 1) -
 
 # /v1/models endpoint
 @app.get("/v1/models")
-async def list_models():
+async def list_models(api_key: str = Depends(get_api_key)):
     # Based on current information for Vertex AI models
     models = [
         {
@@ -427,10 +459,11 @@ def create_openai_error_response(status_code: int, message: str, error_type: str
     }
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: OpenAIRequest):
+async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_api_key)):
     try:
         # Validate model availability
-        if not request.model or not any(model["id"] == request.model for model in list_models().get("data", [])):
+        models_response = await list_models()
+        if not request.model or not any(model["id"] == request.model for model in models_response.get("data", [])):
             error_response = create_openai_error_response(
                 400, f"Model '{request.model}' not found", "invalid_request_error"
             )
@@ -549,7 +582,7 @@ async def chat_completions(request: OpenAIRequest):
 
 # Health check endpoint
 @app.get("/health")
-def health_check():
+def health_check(api_key: str = Depends(get_api_key)):
     # Refresh the credentials list to get the latest status
     credential_manager.refresh_credentials_list()
     

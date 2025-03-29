@@ -58,11 +58,26 @@ The service implements OpenAI-compatible endpoints:
 - `POST /v1/chat/completions` - Create a chat completion
 - `GET /health` - Health check endpoint (includes credential status)
 
+All endpoints require authentication using an API key in the Authorization header.
+
+### Authentication
+
+The service requires an API key for authentication. The default API key is `123456`.
+
+To authenticate, include the API key in the Authorization header using the Bearer token format:
+
+```
+Authorization: Bearer 123456
+```
+
+You can change the API key by setting the `API_KEY` environment variable in the docker-compose.yml file.
+
 ### Example Request
 
 ```bash
 curl -X POST http://localhost:8050/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer 123456" \
   -d '{
     "model": "gemini-1.5-pro",
     "messages": [
@@ -117,6 +132,7 @@ This will return information about the available credentials:
 
 - `CREDENTIALS_DIR`: Directory containing credential files (default: `/app/credentials`)
 - `GOOGLE_APPLICATION_CREDENTIALS`: Path to a specific credential file (used as fallback)
+- `API_KEY`: API key for authentication (default: `123456`)
 
 ## License
 
