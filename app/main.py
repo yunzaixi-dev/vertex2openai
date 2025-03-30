@@ -8,11 +8,16 @@ import time
 import os
 import glob
 import random
-import google.auth
 from google.oauth2 import service_account
-from vertexai.preview.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold, SafetySetting
+# from vertexai.preview.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold, SafetySetting
 import vertexai
 import config
+
+from google.genai import types
+
+from google import genai
+
+client = None
 
 app = FastAPI(title="OpenAI to Gemini Adapter")
 
@@ -91,7 +96,7 @@ class CredentialManager:
         self.current_index = (self.current_index + 1) % len(self.credentials_files)
         
         try:
-            credentials = service_account.Credentials.from_service_account_file(file_path)
+            credentials = service_account.Credentials.from_service_account_file(file_path,scopes=['https://www.googleapis.com/auth/cloud-platform'])
             project_id = credentials.project_id
             print(f"Loaded credentials from {file_path} for project: {project_id}")
             self.credentials = credentials
@@ -114,7 +119,7 @@ class CredentialManager:
         file_path = random.choice(self.credentials_files)
         
         try:
-            credentials = service_account.Credentials.from_service_account_file(file_path)
+            credentials = service_account.Credentials.from_service_account_file(file_path,scopes=['https://www.googleapis.com/auth/cloud-platform'])
             project_id = credentials.project_id
             print(f"Loaded credentials from {file_path} for project: {project_id}")
             self.credentials = credentials
@@ -157,18 +162,20 @@ def init_vertex_ai():
     try:
         # First try to use the credential manager to get credentials
         credentials, project_id = credential_manager.get_next_credentials()
-        
+  
         if credentials and project_id:
-            vertexai.init(credentials=credentials, project=project_id, location="us-central1")
+            client = genai.Client(vertexai=True,credentials=credentials, project=project_id, location="us-central1")
+            # vertexai.init(credentials=credentials, project=project_id, location="us-central1")
             print(f"Initialized Vertex AI with project: {project_id}")
             return True
         
         # Fall back to environment variable if credential manager fails
         file_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
         if file_path and os.path.exists(file_path):
-            credentials = service_account.Credentials.from_service_account_file(file_path)
+            credentials = service_account.Credentials.from_service_account_file(file_path,scopes=['https://www.googleapis.com/auth/cloud-platform'])
             project_id = credentials.project_id
-            vertexai.init(credentials=credentials, project=project_id, location="us-central1")
+            client = genai.Client(vertexai=True,credentials=credentials, project=project_id, location="us-central1")
+            # vertexai.init(credentials=credentials, project=project_id, location="us-central1")
             print(f"Initialized Vertex AI with project: {project_id} (using GOOGLE_APPLICATION_CREDENTIALS)")
             return True
         else:
@@ -362,6 +369,15 @@ async def list_models(api_key: str = Depends(get_api_key)):
             "parent": None,
         },
         {
+            "id": "gemini-2.5-pro-exp-03-25-search",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-exp-03-25",
+            "parent": None,
+        },
+        {
             "id": "gemini-2.0-flash",
             "object": "model",
             "created": int(time.time()),
@@ -371,7 +387,25 @@ async def list_models(api_key: str = Depends(get_api_key)):
             "parent": None,
         },
         {
+            "id": "gemini-2.0-flash-search",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.0-flash",
+            "parent": None,
+        },
+        {
             "id": "gemini-2.0-flash-lite",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.0-flash-lite",
+            "parent": None,
+        },
+        {
+            "id": "gemini-2.0-flash-lite-search",
             "object": "model",
             "created": int(time.time()),
             "owned_by": "google",
@@ -469,8 +503,11 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
             )
             return JSONResponse(status_code=400, content=error_response)
         
-        # Use the model name directly as provided
-        gemini_model = request.model
+        # Check if this is a grounded search model
+        is_grounded_search = request.model.endswith("-search")
+        
+        # Extract the base model name (remove -search suffix if present)
+        gemini_model = request.model.replace("-search", "") if is_grounded_search else request.model
         
         # Create generation config
         generation_config = create_generation_config(request)
@@ -486,7 +523,8 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
         
         # Initialize Vertex AI with the rotated credentials
         try:
-            vertexai.init(credentials=credentials, project=project_id, location="us-central1")
+            client = genai.Client(vertexai=True,credentials=credentials, project=project_id, location="us-central1")
+            # vertexai.init(credentials=credentials, project=project_id, location="us-central1")
             print(f"Using credentials for project: {project_id}")
         except Exception as auth_error:
             error_response = create_openai_error_response(
@@ -495,24 +533,30 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
             return JSONResponse(status_code=500, content=error_response)
         
         # Initialize Gemini model
-        try:
-            model = GenerativeModel(gemini_model)
-        except Exception as model_error:
-            error_response = create_openai_error_response(
-                400, f"Failed to initialize model '{gemini_model}': {str(model_error)}", "invalid_request_error"
-            )
-            return JSONResponse(status_code=400, content=error_response)
+        search_tool = types.Tool(google_search=types.GoogleSearch())
 
         safety_settings = [
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,threshold=HarmBlockThreshold.OFF),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,threshold=HarmBlockThreshold.OFF),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,threshold=HarmBlockThreshold.OFF),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT,threshold=HarmBlockThreshold.OFF)
-        ]
+            types.SafetySetting(
+            category="HARM_CATEGORY_HATE_SPEECH",
+            threshold="OFF"
+            ),types.SafetySetting(
+            category="HARM_CATEGORY_DANGEROUS_CONTENT",
+            threshold="OFF"
+            ),types.SafetySetting(
+            category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            threshold="OFF"
+            ),types.SafetySetting(
+            category="HARM_CATEGORY_HARASSMENT",
+            threshold="OFF"
+        )]
+
+        generation_config["safety_settings"] = safety_settings
+        if is_grounded_search:
+            generation_config["tools"] = [search_tool]
                 
         # Create prompt from messages
         prompt = create_gemini_prompt(request.messages)
-        
+
         if request.stream:
             # Handle streaming response
             async def stream_generator():
@@ -524,11 +568,10 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     # If multiple candidates are requested, we'll generate them sequentially
                     for candidate_index in range(candidate_count):
                         # Generate content with streaming
-                        responses = model.generate_content(
-                            prompt,
-                            generation_config=generation_config,
-                            safety_settings=safety_settings,
-                            stream=True
+                        responses = client.models.generate_content_stream(
+                            model=gemini_model,
+                            contents=prompt,
+                            config=generation_config,
                         )
                         
                         # Convert and yield each chunk
@@ -560,10 +603,10 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     if "candidate_count" not in generation_config:
                         generation_config["candidate_count"] = request.n
                 
-                response = model.generate_content(
-                    prompt,
-                    safety_settings=safety_settings,
-                    generation_config=generation_config
+                response = client.models.generate_content(
+                    model=gemini_model,
+                    contents=prompt,
+                    config=generation_config,
                 )
                 
                 openai_response = convert_to_openai_format(response, request.model)

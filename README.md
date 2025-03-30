@@ -72,7 +72,9 @@ Authorization: Bearer 123456
 
 You can change the API key by setting the `API_KEY` environment variable in the docker-compose.yml file.
 
-### Example Request
+### Example Requests
+
+#### Basic Request
 
 ```bash
 curl -X POST http://localhost:8050/v1/chat/completions \
@@ -87,6 +89,44 @@ curl -X POST http://localhost:8050/v1/chat/completions \
     "temperature": 0.7
   }'
 ```
+
+#### Grounded Search Request
+
+```bash
+curl -X POST http://localhost:8050/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer 123456" \
+  -d '{
+    "model": "gemini-2.5-pro-exp-03-25-search",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant with access to the latest information."},
+      {"role": "user", "content": "What are the latest developments in quantum computing?"}
+    ],
+    "temperature": 0.2
+  }'
+```
+
+### Supported Models
+
+The API supports the following Vertex AI Gemini models:
+
+| Model ID | Description |
+|----------|-------------|
+| `gemini-2.5-pro-exp-03-25` | Gemini 2.5 Pro Experimental (March 25) |
+| `gemini-2.5-pro-exp-03-25-search` | Gemini 2.5 Pro with Google Search grounding |
+| `gemini-2.0-flash` | Gemini 2.0 Flash |
+| `gemini-2.0-flash-search` | Gemini 2.0 Flash with Google Search grounding |
+| `gemini-2.0-flash-lite` | Gemini 2.0 Flash Lite |
+| `gemini-2.0-flash-lite-search` | Gemini 2.0 Flash Lite with Google Search grounding |
+| `gemini-2.0-pro-exp-02-05` | Gemini 2.0 Pro Experimental (February 5) |
+| `gemini-1.5-flash` | Gemini 1.5 Flash |
+| `gemini-1.5-flash-8b` | Gemini 1.5 Flash 8B |
+| `gemini-1.5-pro` | Gemini 1.5 Pro |
+| `gemini-1.0-pro-002` | Gemini 1.0 Pro |
+| `gemini-1.0-pro-vision-001` | Gemini 1.0 Pro Vision |
+| `gemini-embedding-exp` | Gemini Embedding Experimental |
+
+Models with the `-search` suffix enable grounding with Google Search using dynamic retrieval, allowing the model to intelligently decide when to retrieve and reference up-to-date information from the web based on the query.
 
 ### Supported Parameters
 
