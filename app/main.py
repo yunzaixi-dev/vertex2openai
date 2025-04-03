@@ -1,16 +1,16 @@
 from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, ConfigDict
-from typing import List, Dict, Any, Optional, Union
+from pydantic import BaseModel, ConfigDict, Field
+from typing import List, Dict, Any, Optional, Union, Literal
+import base64
+import re
 import json
 import time
 import os
 import glob
 import random
 from google.oauth2 import service_account
-# from vertexai.preview.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold, SafetySetting
-import vertexai
 import config
 
 from google.genai import types
@@ -137,9 +137,20 @@ class CredentialManager:
 credential_manager = CredentialManager()
 
 # Define data models
+class ImageUrl(BaseModel):
+    url: str
+
+class ContentPartImage(BaseModel):
+    type: Literal["image_url"]
+    image_url: ImageUrl
+
+class ContentPartText(BaseModel):
+    type: Literal["text"]
+    text: str
+
 class OpenAIMessage(BaseModel):
     role: str
-    content: Union[str, List[Dict[str, str]]] # Allow string or list of dicts for content
+    content: Union[str, List[Union[ContentPartText, ContentPartImage, Dict[str, Any]]]]
 
 class OpenAIRequest(BaseModel):
     model: str
@@ -195,33 +206,52 @@ async def startup_event():
         print("WARNING: Failed to initialize Vertex AI authentication")
 
 # Conversion functions
-def create_gemini_prompt(messages: List[OpenAIMessage]) -> str:
-    prompt = ""
-    
-    # Extract system message if present
-    system_message = None
+def create_gemini_prompt(messages: List[OpenAIMessage]) -> Union[str, List[Any]]:
+    """
+    Convert OpenAI messages to Gemini format.
+    Returns either a string prompt or a list of content parts if images are present.
+    """
+    # Check if any message contains image content
+    has_images = False
     for message in messages:
-        if message.role == "system":
-            # Handle both string and list[dict] content types
-            if isinstance(message.content, str):
-                system_message = message.content
-            elif isinstance(message.content, list) and message.content and isinstance(message.content[0], dict) and 'text' in message.content[0]:
-                system_message = message.content[0]['text']
-            else:
-                # Handle unexpected format or raise error? For now, assume it's usable or skip.
-                system_message = str(message.content) # Fallback, might need refinement
+        if isinstance(message.content, list):
+            for part in message.content:
+                if isinstance(part, dict) and part.get('type') == 'image_url':
+                    has_images = True
+                    break
+                elif isinstance(part, ContentPartImage):
+                    has_images = True
+                    break
+        if has_images:
             break
     
-    # If system message exists, prepend it
-    if system_message:
-        prompt += f"System: {system_message}\n\n"
-    
-    # Add other messages
-    for message in messages:
-        if message.role == "system":
-            continue  # Already handled
+    # If no images, use the text-only format
+    if not has_images:
+        prompt = ""
         
-        if message.role == "user":
+        # Extract system message if present
+        system_message = None
+        for message in messages:
+            if message.role == "system":
+                # Handle both string and list[dict] content types
+                if isinstance(message.content, str):
+                    system_message = message.content
+                elif isinstance(message.content, list) and message.content and isinstance(message.content[0], dict) and 'text' in message.content[0]:
+                    system_message = message.content[0]['text']
+                else:
+                    # Handle unexpected format or raise error? For now, assume it's usable or skip.
+                    system_message = str(message.content) # Fallback, might need refinement
+                break
+        
+        # If system message exists, prepend it
+        if system_message:
+            prompt += f"System: {system_message}\n\n"
+        
+        # Add other messages
+        for message in messages:
+            if message.role == "system":
+                continue  # Already handled
+            
             # Handle both string and list[dict] content types
             content_text = ""
             if isinstance(message.content, str):
@@ -229,19 +259,90 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> str:
             elif isinstance(message.content, list) and message.content and isinstance(message.content[0], dict) and 'text' in message.content[0]:
                 content_text = message.content[0]['text']
             else:
-                 # Fallback for unexpected format
+                # Fallback for unexpected format
                 content_text = str(message.content)
 
             if message.role == "user":
                 prompt += f"Human: {content_text}\n"
             elif message.role == "assistant":
                 prompt += f"AI: {content_text}\n"
+        
+        # Add final AI prompt if last message was from user
+        if messages[-1].role == "user":
+            prompt += "AI: "
+        
+        return prompt
     
-    # Add final AI prompt if last message was from user
-    if messages[-1].role == "user":
-        prompt += "AI: "
+    # If images are present, create a list of content parts
+    gemini_contents = []
     
-    return prompt
+    # Extract system message if present and add it first
+    for message in messages:
+        if message.role == "system":
+            if isinstance(message.content, str):
+                gemini_contents.append(f"System: {message.content}")
+            elif isinstance(message.content, list):
+                # Extract text from system message
+                system_text = ""
+                for part in message.content:
+                    if isinstance(part, dict) and part.get('type') == 'text':
+                        system_text += part.get('text', '')
+                    elif isinstance(part, ContentPartText):
+                        system_text += part.text
+                if system_text:
+                    gemini_contents.append(f"System: {system_text}")
+            break
+    
+    # Process user and assistant messages
+    for message in messages:
+        if message.role == "system":
+            continue  # Already handled
+        
+        # For string content, add as text
+        if isinstance(message.content, str):
+            prefix = "Human: " if message.role == "user" else "AI: "
+            gemini_contents.append(f"{prefix}{message.content}")
+        
+        # For list content, process each part
+        elif isinstance(message.content, list):
+            # First collect all text parts
+            text_content = ""
+            
+            for part in message.content:
+                # Handle text parts
+                if isinstance(part, dict) and part.get('type') == 'text':
+                    text_content += part.get('text', '')
+                elif isinstance(part, ContentPartText):
+                    text_content += part.text
+            
+            # Add the combined text content if any
+            if text_content:
+                prefix = "Human: " if message.role == "user" else "AI: "
+                gemini_contents.append(f"{prefix}{text_content}")
+            
+            # Then process image parts
+            for part in message.content:
+                # Handle image parts
+                if isinstance(part, dict) and part.get('type') == 'image_url':
+                    image_url = part.get('image_url', {}).get('url', '')
+                    if image_url.startswith('data:'):
+                        # Extract mime type and base64 data
+                        mime_match = re.match(r'data:([^;]+);base64,(.+)', image_url)
+                        if mime_match:
+                            mime_type, b64_data = mime_match.groups()
+                            image_bytes = base64.b64decode(b64_data)
+                            gemini_contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+                elif isinstance(part, ContentPartImage):
+                    image_url = part.image_url.url
+                    if image_url.startswith('data:'):
+                        # Extract mime type and base64 data
+                        mime_match = re.match(r'data:([^;]+);base64,(.+)', image_url)
+                        if mime_match:
+                            mime_type, b64_data = mime_match.groups()
+                            image_bytes = base64.b64decode(b64_data)
+                            gemini_contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+    
+    return gemini_contents
 
 def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     config = {}
@@ -589,9 +690,10 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     # If multiple candidates are requested, we'll generate them sequentially
                     for candidate_index in range(candidate_count):
                         # Generate content with streaming
+                        # Handle both string and list content formats (for images)
                         responses = client.models.generate_content_stream(
                             model=gemini_model,
-                            contents=prompt,
+                            contents=prompt,  # This can be either a string or a list of content parts
                             config=generation_config,
                         )
                         
@@ -623,12 +725,13 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     # Make sure generation_config has candidate_count set
                     if "candidate_count" not in generation_config:
                         generation_config["candidate_count"] = request.n
-                
+                # Handle both string and list content formats (for images)
                 response = client.models.generate_content(
                     model=gemini_model,
-                    contents=prompt,
+                    contents=prompt,  # This can be either a string or a list of content parts
                     config=generation_config,
                 )
+                
                 
                 openai_response = convert_to_openai_format(response, request.model)
                 return JSONResponse(content=openai_response)
