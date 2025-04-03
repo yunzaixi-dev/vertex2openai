@@ -144,7 +144,7 @@ class OpenAIMessage(BaseModel):
 class OpenAIRequest(BaseModel):
     model: str
     messages: List[OpenAIMessage]
-    temperature: Optional[float] = 0.7
+    temperature: Optional[float] = 1.0
     max_tokens: Optional[int] = None
     top_p: Optional[float] = 1.0
     top_k: Optional[int] = None
