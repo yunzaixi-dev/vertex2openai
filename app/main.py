@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import List, Dict, Any, Optional, Union
 import json
 import time
@@ -20,32 +20,6 @@ from google import genai
 client = None
 
 app = FastAPI(title="OpenAI to Gemini Adapter")
-
-# Middleware to log raw request body for debugging
-@app.middleware("http")
-async def log_raw_request_body(request: Request, call_next):
-    if request.url.path == "/v1/chat/completions":
-        body_bytes = await request.body()
-        # Store the body so it can be read again by the endpoint
-        async def receive():
-            return {"type": "http.request", "body": body_bytes, "more_body": False}
-        request = Request(request.scope, receive)
-
-        try:
-            # Decode for printing, handle potential errors
-            body_str = body_bytes.decode('utf-8')
-            print("--- Raw Request Body ---")
-            print(body_str)
-            print("------------------------")
-        except UnicodeDecodeError:
-            print("--- Raw Request Body (non-UTF8) ---")
-            print(body_bytes)
-            print("---------------------------------")
-        except Exception as e:
-            print(f"Error logging request body: {e}")
-
-    response = await call_next(request)
-    return response
 
 # API Key security scheme
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
@@ -182,6 +156,9 @@ class OpenAIRequest(BaseModel):
     logprobs: Optional[int] = None
     response_logprobs: Optional[bool] = None
     n: Optional[int] = None  # Maps to candidate_count in Vertex AI
+
+    # Allow extra fields to pass through without causing validation errors
+    model_config = ConfigDict(extra='allow')
 
 # Configure authentication
 def init_vertex_ai():
