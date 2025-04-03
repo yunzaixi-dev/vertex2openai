@@ -1,8 +1,8 @@
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 import json
 import time
 import os
@@ -20,6 +20,32 @@ from google import genai
 client = None
 
 app = FastAPI(title="OpenAI to Gemini Adapter")
+
+# Middleware to log raw request body for debugging
+@app.middleware("http")
+async def log_raw_request_body(request: Request, call_next):
+    if request.url.path == "/v1/chat/completions":
+        body_bytes = await request.body()
+        # Store the body so it can be read again by the endpoint
+        async def receive():
+            return {"type": "http.request", "body": body_bytes, "more_body": False}
+        request = Request(request.scope, receive)
+
+        try:
+            # Decode for printing, handle potential errors
+            body_str = body_bytes.decode('utf-8')
+            print("--- Raw Request Body ---")
+            print(body_str)
+            print("------------------------")
+        except UnicodeDecodeError:
+            print("--- Raw Request Body (non-UTF8) ---")
+            print(body_bytes)
+            print("---------------------------------")
+        except Exception as e:
+            print(f"Error logging request body: {e}")
+
+    response = await call_next(request)
+    return response
 
 # API Key security scheme
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
@@ -139,7 +165,7 @@ credential_manager = CredentialManager()
 # Define data models
 class OpenAIMessage(BaseModel):
     role: str
-    content: str
+    content: Union[str, List[Dict[str, str]]] # Allow string or list of dicts for content
 
 class OpenAIRequest(BaseModel):
     model: str
@@ -199,7 +225,14 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> str:
     system_message = None
     for message in messages:
         if message.role == "system":
-            system_message = message.content
+            # Handle both string and list[dict] content types
+            if isinstance(message.content, str):
+                system_message = message.content
+            elif isinstance(message.content, list) and message.content and isinstance(message.content[0], dict) and 'text' in message.content[0]:
+                system_message = message.content[0]['text']
+            else:
+                # Handle unexpected format or raise error? For now, assume it's usable or skip.
+                system_message = str(message.content) # Fallback, might need refinement
             break
     
     # If system message exists, prepend it
@@ -212,9 +245,20 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> str:
             continue  # Already handled
         
         if message.role == "user":
-            prompt += f"Human: {message.content}\n"
-        elif message.role == "assistant":
-            prompt += f"AI: {message.content}\n"
+            # Handle both string and list[dict] content types
+            content_text = ""
+            if isinstance(message.content, str):
+                content_text = message.content
+            elif isinstance(message.content, list) and message.content and isinstance(message.content[0], dict) and 'text' in message.content[0]:
+                content_text = message.content[0]['text']
+            else:
+                 # Fallback for unexpected format
+                content_text = str(message.content)
+
+            if message.role == "user":
+                prompt += f"Human: {content_text}\n"
+            elif message.role == "assistant":
+                prompt += f"AI: {content_text}\n"
     
     # Add final AI prompt if last message was from user
     if messages[-1].role == "user":
