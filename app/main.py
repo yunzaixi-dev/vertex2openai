@@ -173,28 +173,45 @@ class OpenAIRequest(BaseModel):
 
 # Configure authentication
 def init_vertex_ai():
+    global client # Ensure we modify the global client variable
     try:
-        # First try to use the credential manager to get credentials
+        # Priority 1: Check for credentials JSON content in environment variable (Hugging Face)
+        credentials_json_str = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+        if credentials_json_str:
+            try:
+                credentials_info = json.loads(credentials_json_str)
+                credentials = service_account.Credentials.from_service_account_info(credentials_info, scopes=['https://www.googleapis.com/auth/cloud-platform'])
+                project_id = credentials.project_id
+                client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
+                print(f"Initialized Vertex AI using GOOGLE_CREDENTIALS_JSON env var for project: {project_id}")
+                return True
+            except Exception as e:
+                print(f"Error loading credentials from GOOGLE_CREDENTIALS_JSON: {e}")
+                # Fall through to other methods if this fails
+
+        # Priority 2: Try to use the credential manager to get credentials from files
         credentials, project_id = credential_manager.get_next_credentials()
-  
+
         if credentials and project_id:
-            client = genai.Client(vertexai=True,credentials=credentials, project=project_id, location="us-central1")
-            # vertexai.init(credentials=credentials, project=project_id, location="us-central1")
-            print(f"Initialized Vertex AI with project: {project_id}")
+            client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
+            print(f"Initialized Vertex AI using Credential Manager for project: {project_id}")
             return True
         
-        # Fall back to environment variable if credential manager fails
+        # Priority 3: Fall back to GOOGLE_APPLICATION_CREDENTIALS environment variable (file path)
         file_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
         if file_path and os.path.exists(file_path):
-            credentials = service_account.Credentials.from_service_account_file(file_path,scopes=['https://www.googleapis.com/auth/cloud-platform'])
-            project_id = credentials.project_id
-            client = genai.Client(vertexai=True,credentials=credentials, project=project_id, location="us-central1")
-            # vertexai.init(credentials=credentials, project=project_id, location="us-central1")
-            print(f"Initialized Vertex AI with project: {project_id} (using GOOGLE_APPLICATION_CREDENTIALS)")
-            return True
-        else:
-            print(f"Error: No valid credentials found. GOOGLE_APPLICATION_CREDENTIALS file not found at {file_path}")
-            return False
+            try:
+                credentials = service_account.Credentials.from_service_account_file(file_path, scopes=['https://www.googleapis.com/auth/cloud-platform'])
+                project_id = credentials.project_id
+                client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
+                print(f"Initialized Vertex AI using GOOGLE_APPLICATION_CREDENTIALS file path for project: {project_id}")
+                return True
+            except Exception as e:
+                 print(f"Error loading credentials from GOOGLE_APPLICATION_CREDENTIALS path {file_path}: {e}")
+        
+        # If none of the methods worked
+        print(f"Error: No valid credentials found. Tried GOOGLE_CREDENTIALS_JSON, Credential Manager ({credential_manager.credentials_dir}), and GOOGLE_APPLICATION_CREDENTIALS.")
+        return False
     except Exception as e:
         print(f"Error initializing authentication: {e}")
         return False
@@ -645,9 +662,9 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
         
         # Initialize Vertex AI with the rotated credentials
         try:
-            client = genai.Client(vertexai=True,credentials=credentials, project=project_id, location="us-central1")
-            # vertexai.init(credentials=credentials, project=project_id, location="us-central1")
-            print(f"Using credentials for project: {project_id}")
+            # Re-initialize client for this request - credentials might have rotated
+            client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
+            print(f"Using credentials for project: {project_id} for this request")
         except Exception as auth_error:
             error_response = create_openai_error_response(
                 500, f"Failed to initialize authentication: {str(auth_error)}", "server_error"

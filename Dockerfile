@@ -16,4 +16,5 @@ RUN mkdir -p /app/credentials
 EXPOSE 8050
 
 # Command to run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8050"]
+# Use the default Hugging Face port 7860
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]

@@ -6,7 +6,8 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8050:8050"
+      # Map host port 8050 to container port 7860 (for Hugging Face compatibility)
+      - "8050:7860"
     volumes:
       - ./credentials:/app/credentials
     environment:
