@@ -179,38 +179,87 @@ def init_vertex_ai():
         credentials_json_str = os.environ.get("GOOGLE_CREDENTIALS_JSON")
         if credentials_json_str:
             try:
-                credentials_info = json.loads(credentials_json_str)
-                credentials = service_account.Credentials.from_service_account_info(credentials_info, scopes=['https://www.googleapis.com/auth/cloud-platform'])
-                project_id = credentials.project_id
-                client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
-                print(f"Initialized Vertex AI using GOOGLE_CREDENTIALS_JSON env var for project: {project_id}")
+                # Try to parse the JSON
+                try:
+                    credentials_info = json.loads(credentials_json_str)
+                    # Check if the parsed JSON has the expected structure
+                    if not isinstance(credentials_info, dict):
+                        # print(f"ERROR: Parsed JSON is not a dictionary, type: {type(credentials_info)}") # Removed
+                        raise ValueError("Credentials JSON must be a dictionary")
+                    # Check for required fields in the service account JSON
+                    required_fields = ["type", "project_id", "private_key_id", "private_key", "client_email"]
+                    missing_fields = [field for field in required_fields if field not in credentials_info]
+                    if missing_fields:
+                        # print(f"ERROR: Missing required fields in credentials JSON: {missing_fields}") # Removed
+                        raise ValueError(f"Credentials JSON missing required fields: {missing_fields}")
+                except json.JSONDecodeError as json_err:
+                    print(f"ERROR: Failed to parse GOOGLE_CREDENTIALS_JSON as JSON: {json_err}")
+                    raise
+
+                # Create credentials from the parsed JSON info (json.loads should handle \n)
+                try:
+
+                    credentials = service_account.Credentials.from_service_account_info(
+                        credentials_info, # Pass the dictionary directly
+                        scopes=['https://www.googleapis.com/auth/cloud-platform']
+                    )
+                    project_id = credentials.project_id
+                    print(f"Successfully created credentials object for project: {project_id}")
+                except Exception as cred_err:
+                    print(f"ERROR: Failed to create credentials from service account info: {cred_err}")
+                    raise
+                
+                # Initialize the client with the credentials
+                try:
+                    client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
+                    print(f"Initialized Vertex AI using GOOGLE_CREDENTIALS_JSON env var for project: {project_id}")
+                except Exception as client_err:
+                    print(f"ERROR: Failed to initialize genai.Client: {client_err}")
+                    raise
                 return True
             except Exception as e:
                 print(f"Error loading credentials from GOOGLE_CREDENTIALS_JSON: {e}")
                 # Fall through to other methods if this fails
 
         # Priority 2: Try to use the credential manager to get credentials from files
+        print(f"Trying credential manager (directory: {credential_manager.credentials_dir})")
         credentials, project_id = credential_manager.get_next_credentials()
 
         if credentials and project_id:
-            client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
-            print(f"Initialized Vertex AI using Credential Manager for project: {project_id}")
-            return True
+            try:
+                client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
+                print(f"Initialized Vertex AI using Credential Manager for project: {project_id}")
+                return True
+            except Exception as e:
+                print(f"ERROR: Failed to initialize client with credentials from Credential Manager: {e}")
         
         # Priority 3: Fall back to GOOGLE_APPLICATION_CREDENTIALS environment variable (file path)
         file_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        if file_path and os.path.exists(file_path):
-            try:
-                credentials = service_account.Credentials.from_service_account_file(file_path, scopes=['https://www.googleapis.com/auth/cloud-platform'])
-                project_id = credentials.project_id
-                client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
-                print(f"Initialized Vertex AI using GOOGLE_APPLICATION_CREDENTIALS file path for project: {project_id}")
-                return True
-            except Exception as e:
-                 print(f"Error loading credentials from GOOGLE_APPLICATION_CREDENTIALS path {file_path}: {e}")
+        if file_path:
+            print(f"Checking GOOGLE_APPLICATION_CREDENTIALS file path: {file_path}")
+            if os.path.exists(file_path):
+                try:
+                    print(f"File exists, attempting to load credentials")
+                    credentials = service_account.Credentials.from_service_account_file(
+                        file_path,
+                        scopes=['https://www.googleapis.com/auth/cloud-platform']
+                    )
+                    project_id = credentials.project_id
+                    print(f"Successfully loaded credentials from file for project: {project_id}")
+                    
+                    try:
+                        client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
+                        print(f"Initialized Vertex AI using GOOGLE_APPLICATION_CREDENTIALS file path for project: {project_id}")
+                        return True
+                    except Exception as client_err:
+                        print(f"ERROR: Failed to initialize client with credentials from file: {client_err}")
+                except Exception as e:
+                    print(f"ERROR: Failed to load credentials from GOOGLE_APPLICATION_CREDENTIALS path {file_path}: {e}")
+            else:
+                print(f"ERROR: GOOGLE_APPLICATION_CREDENTIALS file does not exist at path: {file_path}")
         
         # If none of the methods worked
-        print(f"Error: No valid credentials found. Tried GOOGLE_CREDENTIALS_JSON, Credential Manager ({credential_manager.credentials_dir}), and GOOGLE_APPLICATION_CREDENTIALS.")
+        print(f"ERROR: No valid credentials found. Tried GOOGLE_CREDENTIALS_JSON, Credential Manager ({credential_manager.credentials_dir}), and GOOGLE_APPLICATION_CREDENTIALS.")
         return False
     except Exception as e:
         print(f"Error initializing authentication: {e}")
@@ -651,25 +700,15 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
         # Create generation config
         generation_config = create_generation_config(request)
         
-        # Get fresh credentials for this request
-        credentials, project_id = credential_manager.get_next_credentials()
-        
-        if not credentials or not project_id:
-            error_response = create_openai_error_response(
-                500, "Failed to obtain valid credentials", "server_error"
-            )
-            return JSONResponse(status_code=500, content=error_response)
-        
-        # Initialize Vertex AI with the rotated credentials
-        try:
-            # Re-initialize client for this request - credentials might have rotated
-            client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
-            print(f"Using credentials for project: {project_id} for this request")
-        except Exception as auth_error:
-            error_response = create_openai_error_response(
-                500, f"Failed to initialize authentication: {str(auth_error)}", "server_error"
-            )
-            return JSONResponse(status_code=500, content=error_response)
+        # Use the globally initialized client (from startup)
+        global client
+        if client is None:
+             # This should ideally not happen if startup was successful
+             error_response = create_openai_error_response(
+                 500, "Vertex AI client not initialized", "server_error"
+             )
+             return JSONResponse(status_code=500, content=error_response)
+        print(f"Using globally initialized client.")
         
         # Initialize Gemini model
         search_tool = types.Tool(google_search=types.GoogleSearch())
@@ -777,4 +816,71 @@ def health_check(api_key: str = Depends(get_api_key)):
             "files": [os.path.basename(f) for f in credential_manager.credentials_files],
             "current_index": credential_manager.current_index
         }
+    }
+
+# Diagnostic endpoint for troubleshooting credential issues
+@app.get("/debug/credentials")
+def debug_credentials(api_key: str = Depends(get_api_key)):
+    """
+    Diagnostic endpoint to check credential configuration without actually authenticating.
+    This helps troubleshoot issues with credential setup, especially on Hugging Face.
+    """
+    # Check GOOGLE_CREDENTIALS_JSON
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    creds_json_status = {
+        "present": creds_json is not None,
+        "length": len(creds_json) if creds_json else 0,
+        "parse_status": "not_attempted"
+    }
+    
+    # Try to parse the JSON if present
+    if creds_json:
+        try:
+            creds_info = json.loads(creds_json)
+            # Check for required fields
+            required_fields = ["type", "project_id", "private_key_id", "private_key", "client_email"]
+            missing_fields = [field for field in required_fields if field not in creds_info]
+            
+            creds_json_status.update({
+                "parse_status": "success",
+                "is_dict": isinstance(creds_info, dict),
+                "missing_required_fields": missing_fields,
+                "project_id": creds_info.get("project_id", "not_found"),
+                # Include a safe sample of the private key to check if it's properly formatted
+                "private_key_sample": creds_info.get("private_key", "not_found")[:10] + "..." if "private_key" in creds_info else "not_found"
+            })
+        except json.JSONDecodeError as e:
+            creds_json_status.update({
+                "parse_status": "error",
+                "error": str(e),
+                "sample": creds_json[:20] + "..." if len(creds_json) > 20 else creds_json
+            })
+    
+    # Check credential files
+    credential_manager.refresh_credentials_list()
+    
+    # Check GOOGLE_APPLICATION_CREDENTIALS
+    app_creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    app_creds_status = {
+        "present": app_creds_path is not None,
+        "path": app_creds_path,
+        "exists": os.path.exists(app_creds_path) if app_creds_path else False
+    }
+    
+    return {
+        "environment": {
+            "GOOGLE_CREDENTIALS_JSON": creds_json_status,
+            "CREDENTIALS_DIR": {
+                "path": credential_manager.credentials_dir,
+                "exists": os.path.exists(credential_manager.credentials_dir),
+                "files_found": len(credential_manager.credentials_files),
+                "files": [os.path.basename(f) for f in credential_manager.credentials_files]
+            },
+            "GOOGLE_APPLICATION_CREDENTIALS": app_creds_status
+        },
+        "recommendations": [
+            "Ensure GOOGLE_CREDENTIALS_JSON contains the full, properly formatted JSON content of your service account key",
+            "Check for any special characters or line breaks that might need proper escaping",
+            "Verify that the service account has the necessary permissions for Vertex AI"
+        ]
     }
