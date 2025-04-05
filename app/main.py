@@ -502,8 +502,27 @@ Ready for your request."""
                 # For simplicity, we'll just pass it through as is
                 new_messages.append(message)
         else:
-            # For non-user messages, keep as is
-            new_messages.append(message)
+            # For non-user messages (assistant messages)
+            # Check if this is the last non-user message in the list
+            is_last_assistant = True
+            for remaining_msg in messages[i+1:]:
+                if remaining_msg.role != "user":
+                    is_last_assistant = False
+                    break
+            
+            if is_last_assistant:
+                # URL encode the last assistant message content
+                if isinstance(message.content, str):
+                    new_messages.append(OpenAIMessage(
+                        role=message.role,
+                        content=urllib.parse.quote(message.content)
+                    ))
+                else:
+                    # For non-string content, keep as is
+                    new_messages.append(message)
+            else:
+                # For other non-user messages, keep as is
+                new_messages.append(message)
     
     # Now use the standard function to convert to Gemini format
     return create_gemini_prompt(new_messages)
