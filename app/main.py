@@ -490,19 +490,15 @@ Ready for your request."""
         if i == system_index:
             continue  # Skip the original system message as we've already handled it
         
-        if message.role == "user":
-            # URL encode user message content
-            if isinstance(message.content, str):
-                new_messages.append(OpenAIMessage(
-                    role=message.role,
-                    content=urllib.parse.quote(message.content)
-                ))
-            elif isinstance(message.content, list):
-                # Handle list content (like with images)
-                # For simplicity, we'll just pass it through as is
-                new_messages.append(message)
-        else:
-            # For non-user messages, keep as is
+        # URL encode user message content
+        if isinstance(message.content, str):
+            new_messages.append(OpenAIMessage(
+                role=message.role,
+                content=urllib.parse.quote(message.content)
+            ))
+        elif isinstance(message.content, list):
+            # Handle list content (like with images)
+            # For simplicity, we'll just pass it through as is
             new_messages.append(message)
     
     # Now use the standard function to convert to Gemini format
