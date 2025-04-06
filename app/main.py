@@ -296,29 +296,8 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> Union[str, List[Any]]
     if not has_images:
         prompt = ""
         
-        # Extract system message if present
-        system_message = None
+        # Process all messages in their original order
         for message in messages:
-            if message.role == "system":
-                # Handle both string and list[dict] content types
-                if isinstance(message.content, str):
-                    system_message = message.content
-                elif isinstance(message.content, list) and message.content and isinstance(message.content[0], dict) and 'text' in message.content[0]:
-                    system_message = message.content[0]['text']
-                else:
-                    # Handle unexpected format or raise error? For now, assume it's usable or skip.
-                    system_message = str(message.content) # Fallback, might need refinement
-                break
-        
-        # If system message exists, prepend it
-        if system_message:
-            prompt += f"System: {system_message}\n\n"
-        
-        # Add other messages
-        for message in messages:
-            if message.role == "system":
-                continue  # Already handled
-            
             # Handle both string and list[dict] content types
             content_text = ""
             if isinstance(message.content, str):
@@ -329,7 +308,9 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> Union[str, List[Any]]
                 # Fallback for unexpected format
                 content_text = str(message.content)
 
-            if message.role == "user":
+            if message.role == "system":
+                prompt += f"System: {content_text}\n\n"
+            elif message.role == "user":
                 prompt += f"Human: {content_text}\n"
             elif message.role == "assistant":
                 prompt += f"AI: {content_text}\n"
@@ -343,27 +324,8 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> Union[str, List[Any]]
     # If images are present, create a list of content parts
     gemini_contents = []
     
-    # Extract system message if present and add it first
+    # Process all messages in their original order
     for message in messages:
-        if message.role == "system":
-            if isinstance(message.content, str):
-                gemini_contents.append(f"System: {message.content}")
-            elif isinstance(message.content, list):
-                # Extract text from system message
-                system_text = ""
-                for part in message.content:
-                    if isinstance(part, dict) and part.get('type') == 'text':
-                        system_text += part.get('text', '')
-                    elif isinstance(part, ContentPartText):
-                        system_text += part.text
-                if system_text:
-                    gemini_contents.append(f"System: {system_text}")
-            break
-    
-    # Process user and assistant messages
-    for message in messages:
-        if message.role == "system":
-            continue  # Already handled
         
         # For string content, add as text
         if isinstance(message.content, str):
@@ -460,37 +422,31 @@ Ready for your request."""
     # Create a new list of messages with the pre-messages and encoded content
     new_messages = []
     
-    # Extract system message if present
-    system_message = None
-    system_index = -1
-    for i, message in enumerate(messages):
-        if message.role == "system":
-            system_index = i
-            if isinstance(message.content, str):
-                system_message = message.content
-            elif isinstance(message.content, list) and message.content and isinstance(message.content[0], dict) and 'text' in message.content[0]:
-                system_message = message.content[0]['text']
-            else:
-                system_message = str(message.content)
-            break
-    
-    # Add system message with Chinese instructions if there was a system message
-    if system_message is not None:
-        new_system_content = f"{chinese_instructions}| !!!AND STRICTLY FOLLOW THE FOLLOWING SYSTEM-LEVEL INSTRUCTIONS.!!! |{urllib.parse.quote(system_message)}"
-        new_messages.append(OpenAIMessage(role="system", content=new_system_content))
-    else:
-        # If no system message, add one with just the Chinese instructions
-        new_messages.append(OpenAIMessage(role="system", content=chinese_instructions))
+    # Add a system message with Chinese instructions at the beginning
+    new_messages.append(OpenAIMessage(role="system", content=chinese_instructions))
     
     # Add pre-messages
     new_messages.extend(pre_messages)
     
-    # Add other messages with encoded content for user messages
+    # Process all messages in their original order
     for i, message in enumerate(messages):
-        if i == system_index:
-            continue  # Skip the original system message as we've already handled it
+        if message.role == "system":
+            # # URL encode system message content
+            # if isinstance(message.content, str):
+            #     system_content = message.content
+            # elif isinstance(message.content, list) and message.content and isinstance(message.content[0], dict) and 'text' in message.content[0]:
+            #     system_content = message.content[0]['text']
+            # else:
+            #     system_content = str(message.content)
+            
+            # # URL encode the system message content
+            # new_messages.append(OpenAIMessage(
+            #     role="system",
+            #     content=urllib.parse.quote(system_content)
+            # ))
+            new_messages.append(message)
         
-        if message.role == "user":
+        elif message.role == "user":
             # URL encode user message content
             if isinstance(message.content, str):
                 new_messages.append(OpenAIMessage(
