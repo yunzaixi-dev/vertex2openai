@@ -843,12 +843,21 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
             prompt = create_gemini_prompt(request.messages)
         
         # Log the structure of the prompt (without exposing sensitive content)
-        print(f"Prompt structure: {len(prompt)} messages")
-        for i, msg in enumerate(prompt):
-            role = msg.get('role', 'unknown')
-            parts_count = len(msg.get('parts', []))
-            parts_types = [type(p).__name__ for p in msg.get('parts', [])]
-            print(f"  Message {i+1}: role={role}, parts={parts_count}, types={parts_types}")
+        if isinstance(prompt, list):
+            print(f"Prompt structure: {len(prompt)} messages")
+            for i, msg in enumerate(prompt):
+                role = msg.role if hasattr(msg, 'role') else 'unknown'
+                parts_count = len(msg.parts) if hasattr(msg, 'parts') else 0
+                parts_types = [type(p).__name__ for p in (msg.parts if hasattr(msg, 'parts') else [])]
+                print(f"  Message {i+1}: role={role}, parts={parts_count}, types={parts_types}")
+        elif isinstance(prompt, types.Content):
+            print("Prompt structure: 1 message")
+            role = prompt.role if hasattr(prompt, 'role') else 'unknown'
+            parts_count = len(prompt.parts) if hasattr(prompt, 'parts') else 0
+            parts_types = [type(p).__name__ for p in (prompt.parts if hasattr(prompt, 'parts') else [])]
+            print(f"  Message 1: role={role}, parts={parts_count}, types={parts_types}")
+        else:
+            print("Prompt structure: Unknown format")
 
         if request.stream:
             # Handle streaming response
