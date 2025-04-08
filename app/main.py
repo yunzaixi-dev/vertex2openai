@@ -273,94 +273,66 @@ async def startup_event():
         print("WARNING: Failed to initialize Vertex AI authentication")
 
 # Conversion functions
-def create_gemini_prompt(messages: List[OpenAIMessage]) -> Union[str, List[Any]]:
+# Define supported roles for Gemini API
+SUPPORTED_ROLES = ["user", "model"]
+
+def create_gemini_prompt(messages: List[OpenAIMessage]) -> List[Dict[str, Any]]:
     """
     Convert OpenAI messages to Gemini format.
-    Returns either a string prompt or a list of content parts if images are present.
+    Returns a list of message objects with role and parts as required by the Gemini API.
     """
-    # Check if any message contains image content
-    has_images = False
-    for message in messages:
-        if isinstance(message.content, list):
-            for part in message.content:
-                if isinstance(part, dict) and part.get('type') == 'image_url':
-                    has_images = True
-                    break
-                elif isinstance(part, ContentPartImage):
-                    has_images = True
-                    break
-        if has_images:
-            break
+    print("Converting OpenAI messages to Gemini format...")
     
-    # If no images, use the text-only format
-    if not has_images:
-        prompt = ""
-        
-        # Process all messages in their original order
-        for message in messages:
-            # Handle both string and list[dict] content types
-            content_text = ""
-            if isinstance(message.content, str):
-                content_text = message.content
-            elif isinstance(message.content, list) and message.content and isinstance(message.content[0], dict) and 'text' in message.content[0]:
-                content_text = message.content[0]['text']
-            else:
-                # Fallback for unexpected format
-                content_text = str(message.content)
-
-            if message.role == "system":
-                prompt += f"System: {content_text}\n\n"
-            elif message.role == "user":
-                prompt += f"Human: {content_text}\n"
-            elif message.role == "assistant":
-                prompt += f"AI: {content_text}\n"
-        
-        # Add final AI prompt if last message was from user
-        if messages[-1].role == "user":
-            prompt += "AI: "
-        
-        return prompt
-    
-    # If images are present, create a list of content parts
-    gemini_contents = []
+    # Create a list to hold the Gemini-formatted messages
+    gemini_messages = []
     
     # Process all messages in their original order
-    for message in messages:
+    for idx, message in enumerate(messages):
+        # Map OpenAI roles to Gemini roles
+        role = message.role
         
-        # For string content, add as text
+        # If role is "system", use "user" as specified
+        if role == "system":
+            role = "user"
+        # If role is "assistant", map to "model"
+        elif role == "assistant":
+            role = "model"
+        
+        # Handle unsupported roles as per user's feedback
+        if role not in SUPPORTED_ROLES:
+            if role == "tool":
+                role = "user"
+            else:
+                # If it's the last message, treat it as a user message
+                if idx == len(messages) - 1:
+                    role = "user"
+                else:
+                    role = "model"
+        
+        # Create parts list for this message
+        parts = []
+        
+        # Handle different content types
         if isinstance(message.content, str):
-            prefix = "Human: " if message.role == "user" else "AI: "
-            gemini_contents.append(f"{prefix}{message.content}")
-        
-        # For list content, process each part
+            # Simple string content
+            parts.append({"text": message.content})
         elif isinstance(message.content, list):
-            # First collect all text parts
-            text_content = ""
-            
+            # List of content parts (may include text and images)
             for part in message.content:
-                # Handle text parts
-                if isinstance(part, dict) and part.get('type') == 'text':
-                    text_content += part.get('text', '')
+                if isinstance(part, dict):
+                    if part.get('type') == 'text':
+                        parts.append({"text": part.get('text', '')})
+                    elif part.get('type') == 'image_url':
+                        image_url = part.get('image_url', {}).get('url', '')
+                        if image_url.startswith('data:'):
+                            # Extract mime type and base64 data
+                            mime_match = re.match(r'data:([^;]+);base64,(.+)', image_url)
+                            if mime_match:
+                                mime_type, b64_data = mime_match.groups()
+                                image_bytes = base64.b64decode(b64_data)
+                                parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
                 elif isinstance(part, ContentPartText):
-                    text_content += part.text
-            
-            # Add the combined text content if any
-            if text_content:
-                prefix = "Human: " if message.role == "user" else "AI: "
-                gemini_contents.append(f"{prefix}{text_content}")
-            
-            # Then process image parts
-            for part in message.content:
-                # Handle image parts
-                if isinstance(part, dict) and part.get('type') == 'image_url':
-                    image_url = part.get('image_url', {}).get('url', '')
-                    if image_url.startswith('data:'):
-                        # Extract mime type and base64 data
-                        mime_match = re.match(r'data:([^;]+);base64,(.+)', image_url)
-                        if mime_match:
-                            mime_type, b64_data = mime_match.groups()
-                            image_bytes = base64.b64decode(b64_data)
-                            gemini_contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+                    parts.append({"text": part.text})
                 elif isinstance(part, ContentPartImage):
                     image_url = part.image_url.url
                     if image_url.startswith('data:'):
@@ -369,14 +341,29 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> Union[str, List[Any]]
                         if mime_match:
                             mime_type, b64_data = mime_match.groups()
                             image_bytes = base64.b64decode(b64_data)
-                            gemini_contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
-    return gemini_contents
+                            parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+        else:
+            # Fallback for unexpected format
+            parts.append({"text": str(message.content)})
+        
+        # Add the message with role and parts to our list
+        gemini_messages.append({
+            "role": role,
+            "parts": parts
+        })
+    
+    print(f"Converted to {len(gemini_messages)} Gemini messages")
+    return gemini_messages
+    
+    # No need for the separate image handling branch as we now handle all content types in one flow
 
-def create_encrypted_gemini_prompt(messages: List[OpenAIMessage]) -> Union[str, List[Any]]:
+def create_encrypted_gemini_prompt(messages: List[OpenAIMessage]) -> List[Dict[str, Any]]:
     """
     Convert OpenAI messages to Gemini format with special encoding for the encrypt model.
     This function URL-encodes user messages and adds specific system instructions.
     """
+    print("Creating encrypted Gemini prompt...")
+    
     # Check if any message contains image content
     has_images = False
     for message in messages:
@@ -395,8 +382,8 @@ def create_encrypted_gemini_prompt(messages: List[OpenAIMessage]) -> Union[str, 
     if has_images:
         return create_gemini_prompt(messages)
     
-    # Define the Chinese instructions to be added
-    chinese_instructions = """// AI Assistant Configuration //
+    # Define the instructions to be added
+    instructions = """// AI Assistant Configuration //
 STRICT OPERATING PROTOCOL:
 1.  **Critical Output Format:** Your responses MUST ALWAYS be standard **UNENCODED PLAIN TEXT**. Absolutely NO URL encoding or any other form of encoding in your output. This is non-negotiable.
 2.  **Input Processing (Internal Only):** User messages and conversation history provided to you will be URL-encoded for privacy. Decode these inputs internally before processing.
@@ -422,8 +409,8 @@ Ready for your request."""
     # Create a new list of messages with the pre-messages and encoded content
     new_messages = []
     
-    # Add a system message with Chinese instructions at the beginning
-    new_messages.append(OpenAIMessage(role="system", content=chinese_instructions))
+    # Add a system message with instructions at the beginning
+    new_messages.append(OpenAIMessage(role="system", content=instructions))
     
     # Add pre-messages
     new_messages.extend(pre_messages)
@@ -431,19 +418,7 @@ Ready for your request."""
     # Process all messages in their original order
     for i, message in enumerate(messages):
         if message.role == "system":
-            # # URL encode system message content
-            # if isinstance(message.content, str):
-            #     system_content = message.content
-            # elif isinstance(message.content, list) and message.content and isinstance(message.content[0], dict) and 'text' in message.content[0]:
-            #     system_content = message.content[0]['text']
-            # else:
-            #     system_content = str(message.content)
-            
-            # # URL encode the system message content
-            # new_messages.append(OpenAIMessage(
-            #     role="system",
-            #     content=urllib.parse.quote(system_content)
-            # ))
+            # Pass system messages through as is
             new_messages.append(message)
         
         elif message.role == "user":
@@ -454,12 +429,26 @@ Ready for your request."""
                     content=urllib.parse.quote(message.content)
                 ))
             elif isinstance(message.content, list):
-                # Handle list content (like with images)
-                # For simplicity, we'll just pass it through as is
-                new_messages.append(message)
+                # For list content (like with images), we need to handle each part
+                encoded_parts = []
+                for part in message.content:
+                    if isinstance(part, dict) and part.get('type') == 'text':
+                        # URL encode text parts
+                        encoded_parts.append({
+                            'type': 'text',
+                            'text': urllib.parse.quote(part.get('text', ''))
+                        })
+                    else:
+                        # Pass through non-text parts (like images)
+                        encoded_parts.append(part)
+                
+                new_messages.append(OpenAIMessage(
+                    role=message.role,
+                    content=encoded_parts
+                ))
         else:
-            # For non-user messages (assistant messages)
-            # Check if this is the last non-user message in the list
+            # For assistant messages
+            # Check if this is the last assistant message in the conversation
             is_last_assistant = True
             for remaining_msg in messages[i+1:]:
                 if remaining_msg.role != "user":
@@ -473,13 +462,30 @@ Ready for your request."""
                         role=message.role,
                         content=urllib.parse.quote(message.content)
                     ))
+                elif isinstance(message.content, list):
+                    # Handle list content similar to user messages
+                    encoded_parts = []
+                    for part in message.content:
+                        if isinstance(part, dict) and part.get('type') == 'text':
+                            encoded_parts.append({
+                                'type': 'text',
+                                'text': urllib.parse.quote(part.get('text', ''))
+                            })
+                        else:
+                            encoded_parts.append(part)
+                    
+                    new_messages.append(OpenAIMessage(
+                        role=message.role,
+                        content=encoded_parts
+                    ))
                 else:
-                    # For non-string content, keep as is
+                    # For non-string/list content, keep as is
                     new_messages.append(message)
             else:
-                # For other non-user messages, keep as is
+                # For other assistant messages, keep as is
                 new_messages.append(message)
     
+    print(f"Created encrypted prompt with {len(new_messages)} messages")
     # Now use the standard function to convert to Gemini format
     return create_gemini_prompt(new_messages)
 
@@ -826,6 +832,14 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
             prompt = create_encrypted_gemini_prompt(request.messages)
         else:
             prompt = create_gemini_prompt(request.messages)
+        
+        # Log the structure of the prompt (without exposing sensitive content)
+        print(f"Prompt structure: {len(prompt)} messages")
+        for i, msg in enumerate(prompt):
+            role = msg.get('role', 'unknown')
+            parts_count = len(msg.get('parts', []))
+            parts_types = [type(p).__name__ for p in msg.get('parts', [])]
+            print(f"  Message {i+1}: role={role}, parts={parts_count}, types={parts_types}")
 
         if request.stream:
             # Handle streaming response
@@ -838,12 +852,22 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     # If multiple candidates are requested, we'll generate them sequentially
                     for candidate_index in range(candidate_count):
                         # Generate content with streaming
-                        # Handle both string and list content formats (for images)
-                        responses = client.models.generate_content_stream(
-                            model=gemini_model,
-                            contents=prompt,  # This can be either a string or a list of content parts
-                            config=generation_config,
-                        )
+                        # Handle the new message format for streaming
+                        print(f"Sending streaming request to Gemini API with {len(prompt)} messages")
+                        try:
+                            responses = client.models.generate_content_stream(
+                                model=gemini_model,
+                                contents={"contents": prompt},  # Wrap in contents field as per API docs
+                                config=generation_config,
+                            )
+                        except Exception as e:
+                            # If the above format doesn't work, try the direct format
+                            print(f"First streaming attempt failed: {e}. Trying direct format...")
+                            responses = client.models.generate_content_stream(
+                                model=gemini_model,
+                                contents=prompt,  # Try direct format
+                                config=generation_config,
+                            )
                         
                         # Convert and yield each chunk
                         for response in responses:
@@ -873,12 +897,23 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     # Make sure generation_config has candidate_count set
                     if "candidate_count" not in generation_config:
                         generation_config["candidate_count"] = request.n
-                # Handle both string and list content formats (for images)
-                response = client.models.generate_content(
-                    model=gemini_model,
-                    contents=prompt,  # This can be either a string or a list of content parts
-                    config=generation_config,
-                )
+                # Handle the new message format
+                # The Gemini API expects a specific format for contents
+                print(f"Sending request to Gemini API with {len(prompt)} messages")
+                try:
+                    response = client.models.generate_content(
+                        model=gemini_model,
+                        contents={"contents": prompt},  # Wrap in contents field as per API docs
+                        config=generation_config,
+                    )
+                except Exception as e:
+                    # If the above format doesn't work, try the direct format
+                    print(f"First attempt failed: {e}. Trying direct format...")
+                    response = client.models.generate_content(
+                        model=gemini_model,
+                        contents=prompt,  # Try direct format
+                        config=generation_config,
+                    )
                 
                 
                 openai_response = convert_to_openai_format(response, request.model)
