@@ -276,10 +276,10 @@ async def startup_event():
 # Define supported roles for Gemini API
 SUPPORTED_ROLES = ["user", "model"]
 
-def create_gemini_prompt(messages: List[OpenAIMessage]) -> List[Dict[str, Any]]:
+def create_gemini_prompt(messages: List[OpenAIMessage]) -> Union[types.Content, List[types.Content]]:
     """
     Convert OpenAI messages to Gemini format.
-    Returns a list of message objects with role and parts as required by the Gemini API.
+    Returns a Content object or list of Content objects as required by the Gemini API.
     """
     print("Converting OpenAI messages to Gemini format...")
     
@@ -315,13 +315,13 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> List[Dict[str, Any]]:
         # Handle different content types
         if isinstance(message.content, str):
             # Simple string content
-            parts.append({"text": message.content})
+            parts.append(types.Part.from_text(message.content))
         elif isinstance(message.content, list):
             # List of content parts (may include text and images)
             for part in message.content:
                 if isinstance(part, dict):
                     if part.get('type') == 'text':
-                        parts.append({"text": part.get('text', '')})
+                        parts.append(types.Part.from_text(part.get('text', '')))
                     elif part.get('type') == 'image_url':
                         image_url = part.get('image_url', {}).get('url', '')
                         if image_url.startswith('data:'):
@@ -332,7 +332,7 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> List[Dict[str, Any]]:
                                 image_bytes = base64.b64decode(b64_data)
                                 parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
                 elif isinstance(part, ContentPartText):
-                    parts.append({"text": part.text})
+                    parts.append(types.Part.from_text(part.text))
                 elif isinstance(part, ContentPartImage):
                     image_url = part.image_url.url
                     if image_url.startswith('data:'):
@@ -344,20 +344,29 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> List[Dict[str, Any]]:
                             parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
         else:
             # Fallback for unexpected format
-            parts.append({"text": str(message.content)})
+            parts.append(types.Part.from_text(str(message.content)))
         
-        # Add the message with role and parts to our list
-        gemini_messages.append({
-            "role": role,
-            "parts": parts
-        })
+        # Create a Content object with role and parts
+        content = types.Content(
+            role=role,
+            parts=parts
+        )
+        
+        # Add to our list
+        gemini_messages.append(content)
     
     print(f"Converted to {len(gemini_messages)} Gemini messages")
+    
+    # If there's only one message, return it directly
+    if len(gemini_messages) == 1:
+        return gemini_messages[0]
+    
+    # Otherwise return the list
     return gemini_messages
     
     # No need for the separate image handling branch as we now handle all content types in one flow
 
-def create_encrypted_gemini_prompt(messages: List[OpenAIMessage]) -> List[Dict[str, Any]]:
+def create_encrypted_gemini_prompt(messages: List[OpenAIMessage]) -> Union[types.Content, List[types.Content]]:
     """
     Convert OpenAI messages to Gemini format with special encoding for the encrypt model.
     This function URL-encodes user messages and adds specific system instructions.
@@ -852,22 +861,15 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     # If multiple candidates are requested, we'll generate them sequentially
                     for candidate_index in range(candidate_count):
                         # Generate content with streaming
-                        # Handle the new message format for streaming
-                        print(f"Sending streaming request to Gemini API with {len(prompt)} messages")
-                        try:
-                            responses = client.models.generate_content_stream(
-                                model=gemini_model,
-                                contents={"contents": prompt},  # Wrap in contents field as per API docs
-                                config=generation_config,
-                            )
-                        except Exception as e:
-                            # If the above format doesn't work, try the direct format
-                            print(f"First streaming attempt failed: {e}. Trying direct format...")
-                            responses = client.models.generate_content_stream(
-                                model=gemini_model,
-                                contents=prompt,  # Try direct format
-                                config=generation_config,
-                            )
+                        # Handle the new message format for streaming using Gemini types
+                        print(f"Sending streaming request to Gemini API")
+                        
+                        # The prompt is now either a Content object or a list of Content objects
+                        responses = client.models.generate_content_stream(
+                            model=gemini_model,
+                            contents=prompt,
+                            config=generation_config,
+                        )
                         
                         # Convert and yield each chunk
                         for response in responses:
@@ -897,23 +899,15 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     # Make sure generation_config has candidate_count set
                     if "candidate_count" not in generation_config:
                         generation_config["candidate_count"] = request.n
-                # Handle the new message format
-                # The Gemini API expects a specific format for contents
-                print(f"Sending request to Gemini API with {len(prompt)} messages")
-                try:
-                    response = client.models.generate_content(
-                        model=gemini_model,
-                        contents={"contents": prompt},  # Wrap in contents field as per API docs
-                        config=generation_config,
-                    )
-                except Exception as e:
-                    # If the above format doesn't work, try the direct format
-                    print(f"First attempt failed: {e}. Trying direct format...")
-                    response = client.models.generate_content(
-                        model=gemini_model,
-                        contents=prompt,  # Try direct format
-                        config=generation_config,
-                    )
+                # Handle the new message format using Gemini types
+                print(f"Sending request to Gemini API")
+                
+                # The prompt is now either a Content object or a list of Content objects
+                response = client.models.generate_content(
+                    model=gemini_model,
+                    contents=prompt,
+                    config=generation_config,
+                )
                 
                 
                 openai_response = convert_to_openai_format(response, request.model)
