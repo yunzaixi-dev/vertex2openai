@@ -315,13 +315,13 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> Union[types.Content, 
         # Handle different content types
         if isinstance(message.content, str):
             # Simple string content
-            parts.append(types.Part.from_text(message.content))
+            parts.append(types.Part(text=message.content))
         elif isinstance(message.content, list):
             # List of content parts (may include text and images)
             for part in message.content:
                 if isinstance(part, dict):
                     if part.get('type') == 'text':
-                        parts.append(types.Part.from_text(part.get('text', '')))
+                        parts.append(types.Part(text=part.get('text', '')))
                     elif part.get('type') == 'image_url':
                         image_url = part.get('image_url', {}).get('url', '')
                         if image_url.startswith('data:'):
@@ -332,7 +332,7 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> Union[types.Content, 
                                 image_bytes = base64.b64decode(b64_data)
                                 parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
                 elif isinstance(part, ContentPartText):
-                    parts.append(types.Part.from_text(part.text))
+                    parts.append(types.Part(text=part.text))
                 elif isinstance(part, ContentPartImage):
                     image_url = part.image_url.url
                     if image_url.startswith('data:'):
@@ -344,7 +344,7 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> Union[types.Content, 
                             parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
         else:
             # Fallback for unexpected format
-            parts.append(types.Part.from_text(str(message.content)))
+            parts.append(types.Part(text=str(message.content)))
         
         # Create a Content object with role and parts
         content = types.Content(
