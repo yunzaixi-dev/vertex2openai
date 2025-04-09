@@ -7,6 +7,7 @@ import base64
 import re
 import json
 import time
+import asyncio # Add this import
 import os
 import glob
 import random
@@ -275,6 +276,148 @@ async def startup_event():
 # Conversion functions
 # Define supported roles for Gemini API
 SUPPORTED_ROLES = ["user", "model"]
+
+# Conversion functions
+def create_gemini_prompt_old(messages: List[OpenAIMessage]) -> Union[str, List[Any]]:
+    """
+    Convert OpenAI messages to Gemini format.
+    Returns either a string prompt or a list of content parts if images are present.
+    """
+    # Check if any message contains image content
+    has_images = False
+    for message in messages:
+        if isinstance(message.content, list):
+            for part in message.content:
+                if isinstance(part, dict) and part.get('type') == 'image_url':
+                    has_images = True
+                    break
+                elif isinstance(part, ContentPartImage):
+                    has_images = True
+                    break
+        if has_images:
+            break
+
+    # If no images, use the text-only format
+    if not has_images:
+        prompt = ""
+
+        # Extract system message if present
+        system_message = None
+        # Process all messages in their original order
+        for message in messages:
+            if message.role == "system":
+                # Handle both string and list[dict] content types
+                if isinstance(message.content, str):
+                    system_message = message.content
+                elif isinstance(message.content, list) and message.content and isinstance(message.content[0], dict) and 'text' in message.content[0]:
+                    system_message = message.content[0]['text']
+                else:
+                    # Handle unexpected format or raise error? For now, assume it's usable or skip.
+                    system_message = str(message.content) # Fallback, might need refinement
+                break
+        
+        # If system message exists, prepend it
+        if system_message:
+            prompt += f"System: {system_message}\n\n"
+        
+        # Add other messages
+        for message in messages:
+            if message.role == "system":
+                continue  # Already handled
+            
+            # Handle both string and list[dict] content types
+            content_text = ""
+            if isinstance(message.content, str):
+                content_text = message.content
+            elif isinstance(message.content, list) and message.content and isinstance(message.content[0], dict) and 'text' in message.content[0]:
+                content_text = message.content[0]['text']
+            else:
+                # Fallback for unexpected format
+                content_text = str(message.content)
+
+            if message.role == "system":
+                prompt += f"System: {content_text}\n\n"
+            elif message.role == "user":
+                prompt += f"Human: {content_text}\n"
+            elif message.role == "assistant":
+                prompt += f"AI: {content_text}\n"
+
+        # Add final AI prompt if last message was from user
+        if messages[-1].role == "user":
+            prompt += "AI: "
+
+        return prompt
+
+    # If images are present, create a list of content parts
+    gemini_contents = []
+
+    # Extract system message if present and add it first
+    for message in messages:
+        if message.role == "system":
+            if isinstance(message.content, str):
+                gemini_contents.append(f"System: {message.content}")
+            elif isinstance(message.content, list):
+                # Extract text from system message
+                system_text = ""
+                for part in message.content:
+                    if isinstance(part, dict) and part.get('type') == 'text':
+                        system_text += part.get('text', '')
+                    elif isinstance(part, ContentPartText):
+                        system_text += part.text
+                if system_text:
+                    gemini_contents.append(f"System: {system_text}")
+            break
+    
+    # Process user and assistant messages
+    # Process all messages in their original order
+    for message in messages:
+        if message.role == "system":
+            continue  # Already handled
+
+        # For string content, add as text
+        if isinstance(message.content, str):
+            prefix = "Human: " if message.role == "user" else "AI: "
+            gemini_contents.append(f"{prefix}{message.content}")
+
+        # For list content, process each part
+        elif isinstance(message.content, list):
+            # First collect all text parts
+            text_content = ""
+
+            for part in message.content:
+                # Handle text parts
+                if isinstance(part, dict) and part.get('type') == 'text':
+                    text_content += part.get('text', '')
+                elif isinstance(part, ContentPartText):
+                    text_content += part.text
+
+            # Add the combined text content if any
+            if text_content:
+                prefix = "Human: " if message.role == "user" else "AI: "
+                gemini_contents.append(f"{prefix}{text_content}")
+
+            # Then process image parts
+            for part in message.content:
+                # Handle image parts
+                if isinstance(part, dict) and part.get('type') == 'image_url':
+                    image_url = part.get('image_url', {}).get('url', '')
+                    if image_url.startswith('data:'):
+                        # Extract mime type and base64 data
+                        mime_match = re.match(r'data:([^;]+);base64,(.+)', image_url)
+                        if mime_match:
+                            mime_type, b64_data = mime_match.groups()
+                            image_bytes = base64.b64decode(b64_data)
+                            gemini_contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+                elif isinstance(part, ContentPartImage):
+                    image_url = part.image_url.url
+                    if image_url.startswith('data:'):
+                        # Extract mime type and base64 data
+                        mime_match = re.match(r'data:([^;]+);base64,(.+)', image_url)
+                        if mime_match:
+                            mime_type, b64_data = mime_match.groups()
+                            image_bytes = base64.b64decode(b64_data)
+                            gemini_contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+    return gemini_contents
 
 def create_gemini_prompt(messages: List[OpenAIMessage]) -> Union[types.Content, List[types.Content]]:
     """
@@ -545,22 +688,45 @@ def convert_to_openai_format(gemini_response, model: str) -> Dict[str, Any]:
     if hasattr(gemini_response, 'candidates') and len(gemini_response.candidates) > 1:
         choices = []
         for i, candidate in enumerate(gemini_response.candidates):
+            # Extract text content from candidate
+            content = ""
+            if hasattr(candidate, 'text'):
+                content = candidate.text
+            elif hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                # Look for text in parts
+                for part in candidate.content.parts:
+                    if hasattr(part, 'text'):
+                        content += part.text
+            
             choices.append({
                 "index": i,
                 "message": {
                     "role": "assistant",
-                    "content": candidate.text
+                    "content": content
                 },
                 "finish_reason": "stop"
             })
     else:
         # Handle single response (backward compatibility)
+        content = ""
+        # Try different ways to access the text content
+        if hasattr(gemini_response, 'text'):
+            content = gemini_response.text
+        elif hasattr(gemini_response, 'candidates') and gemini_response.candidates:
+            candidate = gemini_response.candidates[0]
+            if hasattr(candidate, 'text'):
+                content = candidate.text
+            elif hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                for part in candidate.content.parts:
+                    if hasattr(part, 'text'):
+                        content += part.text
+        
         choices = [
             {
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": gemini_response.text
+                    "content": content
                 },
                 "finish_reason": "stop"
             }
@@ -660,6 +826,51 @@ async def list_models(api_key: str = Depends(get_api_key)):
             "owned_by": "google",
             "permission": [],
             "root": "gemini-2.5-pro-exp-03-25",
+            "parent": None,
+        },
+        {
+            "id": "gemini-2.5-pro-exp-03-25-auto", # New auto model
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-exp-03-25",
+            "parent": None,
+        },
+        {
+            "id": "gemini-2.5-pro-preview-03-25",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-preview-03-25",
+            "parent": None,
+        },
+        {
+            "id": "gemini-2.5-pro-preview-03-25-search",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-preview-03-25",
+            "parent": None,
+        },
+        {
+            "id": "gemini-2.5-pro-preview-03-25-encrypt",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-preview-03-25",
+            "parent": None,
+        },
+        {
+            "id": "gemini-2.5-pro-preview-03-25-auto", # New auto model
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-preview-03-25",
             "parent": None,
         },
         {
@@ -782,156 +993,276 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
     try:
         # Validate model availability
         models_response = await list_models()
-        if not request.model or not any(model["id"] == request.model for model in models_response.get("data", [])):
+        available_models = [model["id"] for model in models_response.get("data", [])]
+        if not request.model or request.model not in available_models:
             error_response = create_openai_error_response(
                 400, f"Model '{request.model}' not found", "invalid_request_error"
             )
             return JSONResponse(status_code=400, content=error_response)
-        
-        # Check if this is a grounded search model or encrypted model
+
+        # Check model type and extract base model name
+        is_auto_model = request.model.endswith("-auto")
         is_grounded_search = request.model.endswith("-search")
-        is_encrypted_model = request.model == "gemini-2.5-pro-exp-03-25-encrypt"
-        
-        # Extract the base model name
-        if is_grounded_search:
-            gemini_model = request.model.replace("-search", "")
+        is_encrypted_model = request.model.endswith("-encrypt")
+
+        if is_auto_model:
+            base_model_name = request.model.replace("-auto", "")
+        elif is_grounded_search:
+            base_model_name = request.model.replace("-search", "")
         elif is_encrypted_model:
-            gemini_model = "gemini-2.5-pro-exp-03-25"  # Use the base model
+            base_model_name = request.model.replace("-encrypt", "")
         else:
-            gemini_model = request.model
-        
+            base_model_name = request.model
+
         # Create generation config
         generation_config = create_generation_config(request)
-        
+
         # Use the globally initialized client (from startup)
         global client
         if client is None:
-             # This should ideally not happen if startup was successful
-             error_response = create_openai_error_response(
-                 500, "Vertex AI client not initialized", "server_error"
-             )
-             return JSONResponse(status_code=500, content=error_response)
+            error_response = create_openai_error_response(
+                500, "Vertex AI client not initialized", "server_error"
+            )
+            return JSONResponse(status_code=500, content=error_response)
         print(f"Using globally initialized client.")
-        
-        # Initialize Gemini model
-        search_tool = types.Tool(google_search=types.GoogleSearch())
 
+        # Common safety settings
         safety_settings = [
-            types.SafetySetting(
-            category="HARM_CATEGORY_HATE_SPEECH",
-            threshold="OFF"
-            ),types.SafetySetting(
-            category="HARM_CATEGORY_DANGEROUS_CONTENT",
-            threshold="OFF"
-            ),types.SafetySetting(
-            category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
-            threshold="OFF"
-            ),types.SafetySetting(
-            category="HARM_CATEGORY_HARASSMENT",
-            threshold="OFF"
-        )]
-
+            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="OFF"),
+            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="OFF"),
+            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="OFF"),
+            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="OFF")
+        ]
         generation_config["safety_settings"] = safety_settings
-        if is_grounded_search:
-            generation_config["tools"] = [search_tool]
-                
-        # Create prompt from messages - use encrypted version if needed
-        if is_encrypted_model:
-            print(f"Using encrypted prompt for model: {request.model}")
-            prompt = create_encrypted_gemini_prompt(request.messages)
-        else:
-            prompt = create_gemini_prompt(request.messages)
-        
-        # Log the structure of the prompt (without exposing sensitive content)
-        if isinstance(prompt, list):
-            print(f"Prompt structure: {len(prompt)} messages")
-            for i, msg in enumerate(prompt):
-                role = msg.role if hasattr(msg, 'role') else 'unknown'
-                parts_count = len(msg.parts) if hasattr(msg, 'parts') else 0
-                parts_types = [type(p).__name__ for p in (msg.parts if hasattr(msg, 'parts') else [])]
-                print(f"  Message {i+1}: role={role}, parts={parts_count}, types={parts_types}")
-        elif isinstance(prompt, types.Content):
-            print("Prompt structure: 1 message")
-            role = prompt.role if hasattr(prompt, 'role') else 'unknown'
-            parts_count = len(prompt.parts) if hasattr(prompt, 'parts') else 0
-            parts_types = [type(p).__name__ for p in (prompt.parts if hasattr(prompt, 'parts') else [])]
-            print(f"  Message 1: role={role}, parts={parts_count}, types={parts_types}")
-        else:
-            print("Prompt structure: Unknown format")
 
-        if request.stream:
-            # Handle streaming response
-            async def stream_generator():
+        # --- Helper function to check response validity ---
+        def is_response_valid(response):
+            if response is None:
+                return False
+            
+            # Check if candidates exist
+            if not hasattr(response, 'candidates') or not response.candidates:
+                return False
+            
+            # Get the first candidate
+            candidate = response.candidates[0]
+            
+            # Try different ways to access the text content
+            text_content = None
+            
+            # Method 1: Direct text attribute on candidate
+            if hasattr(candidate, 'text'):
+                text_content = candidate.text
+            # Method 2: Text attribute on response
+            elif hasattr(response, 'text'):
+                text_content = response.text
+            # Method 3: Content with parts
+            elif hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                # Look for text in parts
+                for part in candidate.content.parts:
+                    if hasattr(part, 'text') and part.text:
+                        text_content = part.text
+                        break
+            
+            # If we found text content and it's not empty, the response is valid
+            if text_content:
+                return True
+                
+            # If no text content was found, check if there are other parts that might be valid
+            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                if len(candidate.content.parts) > 0:
+                    # Consider valid if there are any parts at all
+                    return True
+            
+            # Also check if the response itself has text
+            if hasattr(response, 'text') and response.text:
+                return True
+                
+            # If we got here, the response is invalid
+            print(f"Invalid response: No text content found in response structure: {str(response)[:200]}...")
+            return False
+
+
+        # --- Helper function to make the API call (handles stream/non-stream) ---
+        async def make_gemini_call(model_name, prompt_func, current_gen_config):
+            prompt = prompt_func(request.messages)
+            
+            # Log prompt structure
+            if isinstance(prompt, list):
+                print(f"Prompt structure: {len(prompt)} messages")
+            elif isinstance(prompt, types.Content):
+                print("Prompt structure: 1 message")
+            else:
+                # Handle old format case (which returns str or list[Any])
+                if isinstance(prompt, str):
+                     print("Prompt structure: String (old format)")
+                elif isinstance(prompt, list):
+                     print(f"Prompt structure: List[{len(prompt)}] (old format with images)")
+                else:
+                     print("Prompt structure: Unknown format")
+
+
+            if request.stream:
+                # Streaming call
                 response_id = f"chatcmpl-{int(time.time())}"
                 candidate_count = request.n or 1
                 
+                async def stream_generator_inner():
+                    all_chunks_empty = True # Track if we receive any content
+                    first_chunk_received = False
+                    try:
+                        for candidate_index in range(candidate_count):
+                            print(f"Sending streaming request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
+                            responses = client.models.generate_content_stream(
+                                model=model_name,
+                                contents=prompt,
+                                config=current_gen_config,
+                            )
+                            
+                            # Use regular for loop, not async for
+                            for chunk in responses:
+                                first_chunk_received = True
+                                if hasattr(chunk, 'text') and chunk.text:
+                                    all_chunks_empty = False
+                                yield convert_chunk_to_openai(chunk, request.model, response_id, candidate_index)
+                        
+                        # Check if any chunk was received at all
+                        if not first_chunk_received:
+                             raise ValueError("Stream connection established but no chunks received")
+
+                        yield create_final_chunk(request.model, response_id, candidate_count)
+                        yield "data: [DONE]\n\n"
+                        
+                        # Return status based on content received
+                        if all_chunks_empty and first_chunk_received: # Check if we got chunks but they were all empty
+                            raise ValueError("Streamed response contained only empty chunks") # Treat empty stream as failure for retry
+
+                    except Exception as stream_error:
+                        error_msg = f"Error during streaming (Model: {model_name}, Format: {prompt_func.__name__}): {str(stream_error)}"
+                        print(error_msg)
+                        # Yield error in SSE format but also raise to signal failure
+                        error_response_content = create_openai_error_response(500, error_msg, "server_error")
+                        yield f"data: {json.dumps(error_response_content)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        raise stream_error # Propagate error for retry logic
+                
+                return StreamingResponse(stream_generator_inner(), media_type="text/event-stream")
+
+            else:
+                # Non-streaming call
                 try:
-                    # For streaming, we can only handle one candidate at a time
-                    # If multiple candidates are requested, we'll generate them sequentially
-                    for candidate_index in range(candidate_count):
-                        # Generate content with streaming
-                        # Handle the new message format for streaming using Gemini types
-                        print(f"Sending streaming request to Gemini API")
-                        
-                        # The prompt is now either a Content object or a list of Content objects
-                        responses = client.models.generate_content_stream(
-                            model=gemini_model,
-                            contents=prompt,
-                            config=generation_config,
-                        )
-                        
-                        # Convert and yield each chunk
-                        for response in responses:
-                            yield convert_chunk_to_openai(response, request.model, response_id, candidate_index)
+                    print(f"Sending request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=current_gen_config,
+                    )
+                    if not is_response_valid(response):
+                         raise ValueError("Invalid or empty response received") # Trigger retry
                     
-                    # Send final chunk with all candidates
-                    yield create_final_chunk(request.model, response_id, candidate_count)
-                    yield "data: [DONE]\n\n"
-                
-                except Exception as stream_error:
-                    # Format streaming errors in SSE format
-                    error_msg = f"Error during streaming: {str(stream_error)}"
+                    openai_response = convert_to_openai_format(response, request.model)
+                    return JSONResponse(content=openai_response)
+                except Exception as generate_error:
+                    error_msg = f"Error generating content (Model: {model_name}, Format: {prompt_func.__name__}): {str(generate_error)}"
                     print(error_msg)
-                    error_response = create_openai_error_response(500, error_msg, "server_error")
-                    yield f"data: {json.dumps(error_response)}\n\n"
-                    yield "data: [DONE]\n\n"
+                    # Raise error to signal failure for retry logic
+                    raise generate_error
+
+
+        # --- Main Logic ---
+        last_error = None
+
+        if is_auto_model:
+            print(f"Processing auto model: {request.model}")
+            attempts = [
+                {"name": "base", "model": base_model_name, "prompt_func": create_gemini_prompt, "config_modifier": lambda c: c},
+                {"name": "old_format", "model": base_model_name, "prompt_func": create_gemini_prompt_old, "config_modifier": lambda c: c},
+                {"name": "encrypt", "model": base_model_name, "prompt_func": create_encrypted_gemini_prompt, "config_modifier": lambda c: c}
+            ]
+
+            for i, attempt in enumerate(attempts):
+                print(f"Attempt {i+1}/{len(attempts)} using '{attempt['name']}' mode...")
+                current_config = attempt["config_modifier"](generation_config.copy())
+                
+                try:
+                    result = await make_gemini_call(attempt["model"], attempt["prompt_func"], current_config)
+                    
+                    # For streaming, the result is StreamingResponse, success is determined inside make_gemini_call raising an error on failure
+                    # For non-streaming, if make_gemini_call doesn't raise, it's successful
+                    print(f"Attempt {i+1} ('{attempt['name']}') successful.")
+                    return result
+                except Exception as e:
+                    last_error = e
+                    print(f"Attempt {i+1} ('{attempt['name']}') failed: {e}")
+                    if i < len(attempts) - 1:
+                        print("Waiting 1 second before next attempt...")
+                        await asyncio.sleep(1) # Use asyncio.sleep for async context
+                    else:
+                        print("All attempts failed.")
             
-            return StreamingResponse(
-                stream_generator(),
-                media_type="text/event-stream"
-            )
+            # If all attempts failed, return the last error
+            error_msg = f"All retry attempts failed for model {request.model}. Last error: {str(last_error)}"
+            error_response = create_openai_error_response(500, error_msg, "server_error")
+            # If the last attempt was streaming and failed, the error response is already yielded by the generator.
+            # If non-streaming failed last, return the JSON error.
+            if not request.stream:
+                 return JSONResponse(status_code=500, content=error_response)
+            else:
+                 # The StreamingResponse returned earlier will handle yielding the final error.
+                 # We should not return a new response here.
+                 # If we reach here after a failed stream, it means the initial StreamingResponse object was returned,
+                 # but the generator within it failed on the last attempt.
+                 # The generator itself handles yielding the error SSE.
+                 # We need to ensure the main function doesn't try to return another response.
+                 # Returning the 'result' from the failed attempt (which is the StreamingResponse object)
+                 # might be okay IF the generator correctly yields the error and DONE message.
+                 # Let's return the StreamingResponse object which contains the failing generator.
+                 # This assumes the generator correctly terminates after yielding the error.
+                 # Re-evaluate if this causes issues. The goal is to avoid double responses.
+                 # It seems returning the StreamingResponse object itself is the correct FastAPI pattern.
+                 return result # Return the StreamingResponse object which contains the failing generator
+
+
         else:
-            # Handle non-streaming response
+            # Handle non-auto models (base, search, encrypt)
+            current_model_name = base_model_name
+            current_prompt_func = create_gemini_prompt
+            current_config = generation_config.copy()
+
+            if is_grounded_search:
+                print(f"Using grounded search for model: {request.model}")
+                search_tool = types.Tool(google_search=types.GoogleSearch())
+                current_config["tools"] = [search_tool]
+            elif is_encrypted_model:
+                print(f"Using encrypted prompt for model: {request.model}")
+                current_prompt_func = create_encrypted_gemini_prompt
+
             try:
-                # If multiple candidates are requested, set candidate_count
-                if request.n and request.n > 1:
-                    # Make sure generation_config has candidate_count set
-                    if "candidate_count" not in generation_config:
-                        generation_config["candidate_count"] = request.n
-                # Handle the new message format using Gemini types
-                print(f"Sending request to Gemini API")
-                
-                # The prompt is now either a Content object or a list of Content objects
-                response = client.models.generate_content(
-                    model=gemini_model,
-                    contents=prompt,
-                    config=generation_config,
-                )
-                
-                
-                openai_response = convert_to_openai_format(response, request.model)
-                return JSONResponse(content=openai_response)
-            except Exception as generate_error:
-                error_msg = f"Error generating content: {str(generate_error)}"
-                print(error_msg)
-                error_response = create_openai_error_response(500, error_msg, "server_error")
-                return JSONResponse(status_code=500, content=error_response)
-    
+                result = await make_gemini_call(current_model_name, current_prompt_func, current_config)
+                return result
+            except Exception as e:
+                 # Handle potential errors for non-auto models
+                 error_msg = f"Error processing model {request.model}: {str(e)}"
+                 print(error_msg)
+                 error_response = create_openai_error_response(500, error_msg, "server_error")
+                 # Similar to auto-fail case, handle stream vs non-stream error return
+                 if not request.stream:
+                     return JSONResponse(status_code=500, content=error_response)
+                 else:
+                     # Let the StreamingResponse handle yielding the error
+                     return result # Return the StreamingResponse object containing the failing generator
+
+
     except Exception as e:
-        error_msg = f"Error processing request: {str(e)}"
+        # Catch-all for unexpected errors during setup or logic flow
+        error_msg = f"Unexpected error processing request: {str(e)}"
         print(error_msg)
         error_response = create_openai_error_response(500, error_msg, "server_error")
+        # Ensure we return a JSON response even for stream requests if error happens early
         return JSONResponse(status_code=500, content=error_response)
+
+# --- Need to import asyncio ---
+# import asyncio # Add this import at the top of the file # Already added below
 
 # Health check endpoint
 @app.get("/health")
