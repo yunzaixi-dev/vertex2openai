@@ -1201,9 +1201,18 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     # For non-streaming, if make_gemini_call doesn't raise, it's successful
                     print(f"Attempt {i+1} ('{attempt['name']}') successful.")
                     return result
-                except Exception as e:
-                    last_error = e
-                    print(f"Attempt {i+1} ('{attempt['name']}') failed: {e}")
+                except (Exception, ExceptionGroup) as e: # Catch ExceptionGroup as well
+                    actual_error = e
+                    if isinstance(e, ExceptionGroup):
+                         # Attempt to extract the first underlying exception if it's a group
+                         if e.exceptions:
+                             actual_error = e.exceptions[0]
+                         else:
+                             actual_error = ValueError("Empty ExceptionGroup caught") # Fallback
+
+                    last_error = actual_error # Store the original or extracted error
+                    print(f"DEBUG: Caught exception in retry loop: type={type(e)}, potentially wrapped. Using: type={type(actual_error)}, value={repr(actual_error)}") # Updated debug log
+                    print(f"Attempt {i+1} ('{attempt['name']}') failed: {actual_error}") # Log the actual error
                     if i < len(attempts) - 1:
                         print("Waiting 1 second before next attempt...")
                         await asyncio.sleep(1) # Use asyncio.sleep for async context
