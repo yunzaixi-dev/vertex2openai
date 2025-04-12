@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware # Import CORS middleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Dict, Any, Optional, Union, Literal
@@ -22,6 +23,15 @@ from google import genai
 client = None
 
 app = FastAPI(title="OpenAI to Gemini Adapter")
+
+# Add CORS middleware to handle preflight OPTIONS requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods (GET, POST, OPTIONS, etc.)
+    allow_headers=["*"],  # Allows all headers
+)
 
 # API Key security scheme
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
@@ -1064,15 +1074,23 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                         text_content = part.text
                         break
             
-            # If we found text content and it's not empty, the response is valid
-            if text_content:
-                return True
-                
-            # If no text content was found, check if there are other parts that might be valid
-            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                if len(candidate.content.parts) > 0:
-                    # Consider valid if there are any parts at all
-                    return True
+            # Check the extracted text content
+            if text_content is None:
+                 # No text content was found at all. Check for other parts as a fallback?
+                 # For now, let's consider no text as invalid for retry purposes,
+                 # as the primary goal is text generation.
+                 # If other non-text parts WERE valid outcomes, this logic would need adjustment.
+                 # Original check considered any parts as valid if text was missing/empty:
+                 # if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                 #     if len(candidate.content.parts) > 0:
+                 #         return True
+                 return False # Treat no text found as invalid
+            elif text_content == '':
+                 # Explicit empty string found
+                 return False # Treat empty string as invalid for retry
+            else:
+                 # Non-empty text content found
+                 return True # Valid response
             
             # Also check if the response itself has text
             if hasattr(response, 'text') and response.text:
