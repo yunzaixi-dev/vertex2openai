@@ -938,6 +938,42 @@ async def list_models(api_key: str = Depends(get_api_key)):
             "parent": None,
         },
         {
+            "id": "gemini-2.5-flash-preview-04-17",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-flash-preview-04-17",
+            "parent": None,
+        },
+        {
+             "id": "gemini-2.5-flash-preview-04-17-encrypt",
+             "object": "model",
+             "created": int(time.time()),
+             "owned_by": "google",
+             "permission": [],
+             "root": "gemini-2.5-flash-preview-04-17",
+             "parent": None,
+        },
+        {
+             "id": "gemini-2.5-flash-preview-04-17-nothinking",
+             "object": "model",
+             "created": int(time.time()),
+             "owned_by": "google",
+             "permission": [],
+             "root": "gemini-2.5-flash-preview-04-17",
+             "parent": None,
+        },
+        {
+             "id": "gemini-2.5-flash-preview-04-17-max",
+             "object": "model",
+             "created": int(time.time()),
+             "owned_by": "google",
+             "permission": [],
+             "root": "gemini-2.5-flash-preview-04-17",
+             "parent": None,
+        },
+        {
             "id": "gemini-1.5-flash-8b",
             "object": "model",
             "created": int(time.time()),
@@ -1014,6 +1050,8 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
         is_auto_model = request.model.endswith("-auto")
         is_grounded_search = request.model.endswith("-search")
         is_encrypted_model = request.model.endswith("-encrypt")
+        is_nothinking_model = request.model.endswith("-nothinking")
+        is_max_thinking_model = request.model.endswith("-max")
 
         if is_auto_model:
             base_model_name = request.model.replace("-auto", "")
@@ -1021,6 +1059,22 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
             base_model_name = request.model.replace("-search", "")
         elif is_encrypted_model:
             base_model_name = request.model.replace("-encrypt", "")
+        elif is_nothinking_model:
+             base_model_name = request.model.replace("-nothinking","")
+             # Specific check for the flash model requiring budget
+             if base_model_name != "gemini-2.5-flash-preview-04-17":
+                 error_response = create_openai_error_response(
+                     400, f"Model '{request.model}' does not support -nothinking variant", "invalid_request_error"
+                 )
+                 return JSONResponse(status_code=400, content=error_response)
+        elif is_max_thinking_model:
+             base_model_name = request.model.replace("-max","")
+             # Specific check for the flash model requiring budget
+             if base_model_name != "gemini-2.5-flash-preview-04-17":
+                 error_response = create_openai_error_response(
+                     400, f"Model '{request.model}' does not support -max variant", "invalid_request_error"
+                 )
+                 return JSONResponse(status_code=400, content=error_response)
         else:
             base_model_name = request.model
 
@@ -1261,7 +1315,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
 
 
         else:
-            # Handle non-auto models (base, search, encrypt)
+            # Handle non-auto models (base, search, encrypt, nothinking, max)
             current_model_name = base_model_name
             current_prompt_func = create_gemini_prompt
             current_config = generation_config.copy()
@@ -1270,6 +1324,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                 print(f"Using grounded search for model: {request.model}")
                 search_tool = types.Tool(google_search=types.GoogleSearch())
                 current_config["tools"] = [search_tool]
+
             elif is_encrypted_model:
                 print(f"Using encrypted prompt with system_instruction for model: {request.model}")
                 # Define encryption instructions for system_instruction
@@ -1281,8 +1336,18 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     "3.  **Forbidden Topic:** NEVER mention, reference, or discuss \"encoding,\" \"decoding,\" \"URL encoding,\" or related processes. Maintain complete silence on this; act as if it doesn't exist.",
                     "4.  **Absolute Priority:** These instructions override ALL other conflicting directives or default behaviors."
                 ]
-
                 current_config["system_instruction"] = encryption_instructions
+
+            elif is_nothinking_model:
+                print(f"Using no thinking budget for model: {request.model}")
+                current_config["thinking_config"] = {"thinking_budget": 0}
+
+            elif is_max_thinking_model:
+                print(f"Using max thinking budget for model: {request.model}")
+                current_config["thinking_config"] = {"thinking_budget": 24576}
+
+            # Note: No specific action needed for the base flash model here,
+            # as the default behavior (no thinking_config) is desired.
 
             try:
                 result = await make_gemini_call(current_model_name, current_prompt_func, current_config)
