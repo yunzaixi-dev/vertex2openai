@@ -670,12 +670,12 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     if request.stop is not None:
         config["stop_sequences"] = request.stop
     
-    # Additional parameters with direct mappings
-    if request.presence_penalty is not None:
-        config["presence_penalty"] = request.presence_penalty
+    # # Additional parameters with direct mappings
+    # if request.presence_penalty is not None:
+    #     config["presence_penalty"] = request.presence_penalty
     
-    if request.frequency_penalty is not None:
-        config["frequency_penalty"] = request.frequency_penalty
+    # if request.frequency_penalty is not None:
+    #     config["frequency_penalty"] = request.frequency_penalty
     
     if request.seed is not None:
         config["seed"] = request.seed
