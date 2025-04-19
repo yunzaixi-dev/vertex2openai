@@ -81,7 +81,7 @@ class CredentialManager:
         self.credentials_files = glob.glob(pattern)
         
         if not self.credentials_files:
-            print(f"No credential files found in {self.credentials_dir}")
+            # print(f"No credential files found in {self.credentials_dir}")
             return False
         
         print(f"Found {len(self.credentials_files)} credential files: {[os.path.basename(f) for f in self.credentials_files]}")
@@ -224,34 +224,35 @@ def init_vertex_ai():
                 # Initialize the client with the credentials
                 try:
                     client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
-                    print(f"Initialized Vertex AI using GOOGLE_CREDENTIALS_JSON env var for project: {project_id}")
+                    # print(f"Initialized Vertex AI using GOOGLE_CREDENTIALS_JSON env var for project: {project_id}") # Reduced verbosity
                 except Exception as client_err:
-                    print(f"ERROR: Failed to initialize genai.Client: {client_err}")
+                    print(f"ERROR: Failed to initialize genai.Client from GOOGLE_CREDENTIALS_JSON: {client_err}") # Added context
                     raise
                 return True
             except Exception as e:
-                print(f"Error loading credentials from GOOGLE_CREDENTIALS_JSON: {e}")
+                # print(f"Error loading credentials from GOOGLE_CREDENTIALS_JSON: {e}") # Reduced verbosity, error logged above
+                pass # Add pass to avoid empty block error
                 # Fall through to other methods if this fails
-
+        
         # Priority 2: Try to use the credential manager to get credentials from files
-        print(f"Trying credential manager (directory: {credential_manager.credentials_dir})")
+        # print(f"Trying credential manager (directory: {credential_manager.credentials_dir})") # Reduced verbosity
         credentials, project_id = credential_manager.get_next_credentials()
-
+        
         if credentials and project_id:
             try:
                 client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
-                print(f"Initialized Vertex AI using Credential Manager for project: {project_id}")
+                # print(f"Initialized Vertex AI using Credential Manager for project: {project_id}") # Reduced verbosity
                 return True
             except Exception as e:
-                print(f"ERROR: Failed to initialize client with credentials from Credential Manager: {e}")
+                print(f"ERROR: Failed to initialize client with credentials from Credential Manager file ({credential_manager.credentials_dir}): {e}") # Added context
         
         # Priority 3: Fall back to GOOGLE_APPLICATION_CREDENTIALS environment variable (file path)
         file_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
         if file_path:
-            print(f"Checking GOOGLE_APPLICATION_CREDENTIALS file path: {file_path}")
+            # print(f"Checking GOOGLE_APPLICATION_CREDENTIALS file path: {file_path}") # Reduced verbosity
             if os.path.exists(file_path):
                 try:
-                    print(f"File exists, attempting to load credentials")
+                    # print(f"File exists, attempting to load credentials") # Reduced verbosity
                     credentials = service_account.Credentials.from_service_account_file(
                         file_path,
                         scopes=['https://www.googleapis.com/auth/cloud-platform']
@@ -261,17 +262,17 @@ def init_vertex_ai():
                     
                     try:
                         client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
-                        print(f"Initialized Vertex AI using GOOGLE_APPLICATION_CREDENTIALS file path for project: {project_id}")
+                        # print(f"Initialized Vertex AI using GOOGLE_APPLICATION_CREDENTIALS file path for project: {project_id}") # Reduced verbosity
                         return True
                     except Exception as client_err:
-                        print(f"ERROR: Failed to initialize client with credentials from file: {client_err}")
+                        print(f"ERROR: Failed to initialize client with credentials from GOOGLE_APPLICATION_CREDENTIALS file ({file_path}): {client_err}") # Added context
                 except Exception as e:
-                    print(f"ERROR: Failed to load credentials from GOOGLE_APPLICATION_CREDENTIALS path {file_path}: {e}")
+                    print(f"ERROR: Failed to load credentials from GOOGLE_APPLICATION_CREDENTIALS path ({file_path}): {e}") # Added context
             else:
                 print(f"ERROR: GOOGLE_APPLICATION_CREDENTIALS file does not exist at path: {file_path}")
         
-        # If none of the methods worked
-        print(f"ERROR: No valid credentials found. Tried GOOGLE_CREDENTIALS_JSON, Credential Manager ({credential_manager.credentials_dir}), and GOOGLE_APPLICATION_CREDENTIALS.")
+        # If none of the methods worked, this error is still useful
+        # print(f"ERROR: No valid credentials found. Tried GOOGLE_CREDENTIALS_JSON, Credential Manager ({credential_manager.credentials_dir}), and GOOGLE_APPLICATION_CREDENTIALS.")
         return False
     except Exception as e:
         print(f"Error initializing authentication: {e}")
@@ -280,8 +281,10 @@ def init_vertex_ai():
 # Initialize Vertex AI at startup
 @app.on_event("startup")
 async def startup_event():
-    if not init_vertex_ai():
-        print("WARNING: Failed to initialize Vertex AI authentication")
+    if init_vertex_ai():
+        print("INFO: Vertex AI client successfully initialized.")
+    else:
+        print("ERROR: Failed to initialize Vertex AI client. Please check credential configuration (GOOGLE_CREDENTIALS_JSON, /app/credentials/*.json, or GOOGLE_APPLICATION_CREDENTIALS) and logs for details.")
 
 # Conversion functions
 # Define supported roles for Gemini API
