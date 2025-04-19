@@ -1175,7 +1175,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                      print("Prompt structure: Unknown format")
 
 
-            model_instance = client.get_model(f"models/{model_name}") # Get the model instance
+            model_instance = genai.GenerativeModel(model_name=model_name) # Use genai.GenerativeModel
 
             if request.stream:
                 # Streaming call (Async)
@@ -1369,12 +1369,16 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                  error_msg = f"Error processing model {request.model}: {str(e)}"
                  print(error_msg)
                  error_response = create_openai_error_response(500, error_msg, "server_error")
-                 # Similar to auto-fail case, handle stream vs non-stream error return
+                 # If it was NOT a streaming request, return the JSON error.
+                 # If it WAS a streaming request, the error is yielded within the
+                 # stream_generator_inner's own except block, so we don't return anything here.
                  if not request.stream:
                      return JSONResponse(status_code=500, content=error_response)
-                 else:
-                     # Let the StreamingResponse handle yielding the error
-                     return result # Return the StreamingResponse object containing the failing generator
+                 # For streaming errors caught here (less likely now async calls are awaited directly),
+                 # the exception would propagate up. The stream generator handles its internal errors.
+                 # We raise the error to ensure the main try/except catches it if needed,
+                 # but primarily rely on the stream generator's error handling.
+                 raise e
 
 
     except Exception as e:
