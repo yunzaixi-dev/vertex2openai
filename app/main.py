@@ -1175,8 +1175,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                      print("Prompt structure: Unknown format")
 
 
-            model_instance = genai.GenerativeModel(model_name=model_name) # Use genai.GenerativeModel
-
+            # Use the client.models object as in the original synchronous code
             if request.stream:
                 # Streaming call (Async)
                 response_id = f"chatcmpl-{int(time.time())}"
@@ -1188,9 +1187,11 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     try:
                         # No need to loop candidate_index here, the stream handles multiple candidates if config asks for it
                         print(f"Sending async streaming request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
-                        async_responses = await model_instance.generate_content_stream_async( # Use await and async method
+                        # Call async stream method on client.models
+                        async_responses = await client.models.generate_content_stream_async(
+                            model=model_name, # Pass model name here
                             contents=prompt,
-                            generation_config=current_gen_config, # Use generation_config parameter
+                            generation_config=current_gen_config,
                             # safety_settings=current_gen_config.get("safety_settings", None) # Pass safety separately if needed
                         )
 
@@ -1198,12 +1199,10 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                         async for chunk in async_responses: # Use async for
                             first_chunk_received = True
                             # Determine candidate_index based on the chunk itself if possible, fallback to 0
-                            # Note: Adjust this if the async stream chunk structure provides candidate index differently
                             candidate_index = 0 # Assuming default index for now
-                            if hasattr(chunk, '_candidate_index'): # Check for potential internal attribute (may change)
+                            if hasattr(chunk, '_candidate_index'): # Check for potential internal attribute
                                  candidate_index = chunk._candidate_index
                             elif hasattr(chunk, 'candidates') and chunk.candidates and hasattr(chunk.candidates[0], 'index'):
-                                 # Or check standard candidate structure if available on chunk
                                  candidate_index = chunk.candidates[0].index
 
                             if hasattr(chunk, 'text') and chunk.text:
@@ -1218,8 +1217,8 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                         yield "data: [DONE]\n\n"
 
                         # Return status based on content received
-                        if all_chunks_empty and first_chunk_received: # Check if we got chunks but they were all empty
-                            raise ValueError("Streamed response contained only empty chunks") # Treat empty stream as failure for retry
+                        if all_chunks_empty and first_chunk_received:
+                            raise ValueError("Streamed response contained only empty chunks")
 
                     except Exception as stream_error:
                         error_msg = f"Error during async streaming (Model: {model_name}, Format: {prompt_func.__name__}): {str(stream_error)}"
@@ -1236,9 +1235,11 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                 # Non-streaming call (Async)
                 try:
                     print(f"Sending async request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
-                    response = await model_instance.generate_content_async( # Use await and async method
+                    # Call async method on client.models
+                    response = await client.models.generate_content_async(
+                        model=model_name, # Pass model name here
                         contents=prompt,
-                        generation_config=current_gen_config, # Use generation_config parameter
+                        generation_config=current_gen_config,
                         # safety_settings=current_gen_config.get("safety_settings", None) # Pass safety separately if needed
                     )
                     if not is_response_valid(response):
