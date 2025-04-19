@@ -314,31 +314,9 @@ def create_gemini_prompt_old(messages: List[OpenAIMessage]) -> Union[str, List[A
     # If no images, use the text-only format
     if not has_images:
         prompt = ""
-
-        # Extract system message if present
-        system_message = None
-        # Process all messages in their original order
-        for message in messages:
-            if message.role == "system":
-                # Handle both string and list[dict] content types
-                if isinstance(message.content, str):
-                    system_message = message.content
-                elif isinstance(message.content, list) and message.content and isinstance(message.content[0], dict) and 'text' in message.content[0]:
-                    system_message = message.content[0]['text']
-                else:
-                    # Handle unexpected format or raise error? For now, assume it's usable or skip.
-                    system_message = str(message.content) # Fallback, might need refinement
-                break
-        
-        # If system message exists, prepend it
-        if system_message:
-            prompt += f"System: {system_message}\n\n"
         
         # Add other messages
         for message in messages:
-            if message.role == "system":
-                continue  # Already handled
-            
             # Handle both string and list[dict] content types
             content_text = ""
             if isinstance(message.content, str):
@@ -385,12 +363,10 @@ def create_gemini_prompt_old(messages: List[OpenAIMessage]) -> Union[str, List[A
     # Process user and assistant messages
     # Process all messages in their original order
     for message in messages:
-        if message.role == "system":
-            continue  # Already handled
 
         # For string content, add as text
         if isinstance(message.content, str):
-            prefix = "Human: " if message.role == "user" else "AI: "
+            prefix = "Human: " if message.role == "user" or message.role == "system" else "AI: "
             gemini_contents.append(f"{prefix}{message.content}")
 
         # For list content, process each part
@@ -407,7 +383,7 @@ def create_gemini_prompt_old(messages: List[OpenAIMessage]) -> Union[str, List[A
 
             # Add the combined text content if any
             if text_content:
-                prefix = "Human: " if message.role == "user" else "AI: "
+                prefix = "Human: " if message.role == "user" or message.role == "system" else "AI: "
                 gemini_contents.append(f"{prefix}{text_content}")
 
             # Then process image parts
@@ -1167,8 +1143,8 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
             
             attempts = [
                 {"name": "base", "model": base_model_name, "prompt_func": create_gemini_prompt, "config_modifier": lambda c: c},
-                {"name": "old_format", "model": base_model_name, "prompt_func": create_gemini_prompt_old, "config_modifier": lambda c: c},
-                {"name": "encrypt", "model": base_model_name, "prompt_func": create_encrypted_gemini_prompt, "config_modifier": lambda c: {**c, "system_instruction": encryption_instructions}}      
+                {"name": "encrypt", "model": base_model_name, "prompt_func": create_encrypted_gemini_prompt, "config_modifier": lambda c: {**c, "system_instruction": encryption_instructions}},
+                {"name": "old_format", "model": base_model_name, "prompt_func": create_gemini_prompt_old, "config_modifier": lambda c: c}                  
             ]
 
             for i, attempt in enumerate(attempts):
