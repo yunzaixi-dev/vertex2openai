@@ -17,4 +17,8 @@ services:
       - CREDENTIALS_DIR=/app/credentials
       # API key for authentication (default: 123456)
       - API_KEY=123456
+      # Enable/disable fake streaming (default: false)
+      - FAKE_STREAMING=false
+      # Interval for fake streaming keep-alive messages (default: 1.0)
+      - FAKE_STREAMING_INTERVAL=1.0
     restart: unless-stopped
