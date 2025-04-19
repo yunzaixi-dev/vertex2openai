@@ -1079,8 +1079,9 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
 
 
             if request.stream:
-                # Check if fake streaming is enabled
-                if config.FAKE_STREAMING:
+                # Check if fake streaming is enabled (directly from environment variable)
+                fake_streaming = os.environ.get("FAKE_STREAMING", "false").lower() == "true"
+                if fake_streaming:
                     return await fake_stream_generator(model_name, prompt, current_gen_config, request)
                 
                 # Regular streaming call
@@ -1219,7 +1220,13 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                  # This assumes the generator correctly terminates after yielding the error.
                  # Re-evaluate if this causes issues. The goal is to avoid double responses.
                  # It seems returning the StreamingResponse object itself is the correct FastAPI pattern.
-                 return result # Return the StreamingResponse object which contains the failing generator
+                 # For streaming requests, we need to return a new StreamingResponse with an error
+                 # since we can't access the previous StreamingResponse objects
+                 async def error_stream():
+                     yield f"data: {json.dumps(error_response)}\n\n"
+                     yield "data: [DONE]\n\n"
+                 
+                 return StreamingResponse(error_stream(), media_type="text/event-stream")
 
 
         else:
@@ -1259,7 +1266,12 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                      return JSONResponse(status_code=500, content=error_response)
                  else:
                      # Let the StreamingResponse handle yielding the error
-                     return result # Return the StreamingResponse object containing the failing generator
+                     # For streaming requests, create a new error stream
+                     async def error_stream():
+                         yield f"data: {json.dumps(error_response)}\n\n"
+                         yield "data: [DONE]\n\n"
+                     
+                     return StreamingResponse(error_stream(), media_type="text/event-stream")
 
 
     except Exception as e:
@@ -1366,7 +1378,9 @@ async def fake_stream_generator(model_name, prompt, current_gen_config, request)
             keep_alive_sent += 1
             
             # Wait before sending the next keep-alive message
-            await asyncio.sleep(config.FAKE_STREAMING_INTERVAL)
+            # Get interval from environment variable directly
+            fake_streaming_interval = float(os.environ.get("FAKE_STREAMING_INTERVAL", "1.0"))
+            await asyncio.sleep(fake_streaming_interval)
         
         try:
             # Get the response from the completed task
