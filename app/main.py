@@ -19,6 +19,7 @@ import config
 from google.genai import types
 
 from google import genai
+import math
 
 client = None
 
@@ -1057,62 +1058,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
         ]
         generation_config["safety_settings"] = safety_settings
 
-        # --- Helper function to check response validity ---
-        def is_response_valid(response):
-            if response is None:
-                return False
             
-            # Check if candidates exist
-            if not hasattr(response, 'candidates') or not response.candidates:
-                return False
-            
-            # Get the first candidate
-            candidate = response.candidates[0]
-            
-            # Try different ways to access the text content
-            text_content = None
-            
-            # Method 1: Direct text attribute on candidate
-            if hasattr(candidate, 'text'):
-                text_content = candidate.text
-            # Method 2: Text attribute on response
-            elif hasattr(response, 'text'):
-                text_content = response.text
-            # Method 3: Content with parts
-            elif hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                # Look for text in parts
-                for part in candidate.content.parts:
-                    if hasattr(part, 'text') and part.text:
-                        text_content = part.text
-                        break
-            
-            # Check the extracted text content
-            if text_content is None:
-                 # No text content was found at all. Check for other parts as a fallback?
-                 # For now, let's consider no text as invalid for retry purposes,
-                 # as the primary goal is text generation.
-                 # If other non-text parts WERE valid outcomes, this logic would need adjustment.
-                 # Original check considered any parts as valid if text was missing/empty:
-                 # if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                 #     if len(candidate.content.parts) > 0:
-                 #         return True
-                 return False # Treat no text found as invalid
-            elif text_content == '':
-                 # Explicit empty string found
-                 return False # Treat empty string as invalid for retry
-            else:
-                 # Non-empty text content found
-                 return True # Valid response
-            
-            # Also check if the response itself has text
-            if hasattr(response, 'text') and response.text:
-                return True
-                
-            # If we got here, the response is invalid
-            print(f"Invalid response: No text content found in response structure: {str(response)[:200]}...")
-            return False
-
-
         # --- Helper function to make the API call (handles stream/non-stream) ---
         async def make_gemini_call(model_name, prompt_func, current_gen_config):
             prompt = prompt_func(request.messages)
@@ -1133,7 +1079,11 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
 
 
             if request.stream:
-                # Streaming call
+                # Check if fake streaming is enabled
+                if config.FAKE_STREAMING:
+                    return await fake_stream_generator(model_name, prompt, current_gen_config, request)
+                
+                # Regular streaming call
                 response_id = f"chatcmpl-{int(time.time())}"
                 candidate_count = request.n or 1
                 
@@ -1319,6 +1269,171 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
         error_response = create_openai_error_response(500, error_msg, "server_error")
         # Ensure we return a JSON response even for stream requests if error happens early
         return JSONResponse(status_code=500, content=error_response)
+
+# --- Helper function to check response validity ---
+# Moved function definition here from inside chat_completions
+def is_response_valid(response):
+    """Checks if the Gemini response contains valid, non-empty text content."""
+    if response is None:
+        return False
+
+    # Check if candidates exist and are not empty
+    if not hasattr(response, 'candidates') or not response.candidates:
+        # Blocked responses might lack candidates
+        if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+             print(f"Response blocked: {response.prompt_feedback.block_reason}")
+             # Consider blocked prompts as 'invalid' for retry logic,
+             # but note the specific reason if needed elsewhere.
+             return False
+        print("Response has no candidates.")
+        return False
+
+    # Get the first candidate
+    candidate = response.candidates[0]
+
+    # Check finish reason - if blocked, it's invalid
+    if hasattr(candidate, 'finish_reason') and candidate.finish_reason != 1: # 1 == STOP
+         print(f"Candidate finish reason indicates issue: {candidate.finish_reason}")
+         #SAFETY = 2, RECITATION = 3, OTHER = 4
+         return False
+
+    # Try different ways to access the text content
+    text_content = None
+
+    # Method 1: Direct text attribute on candidate (sometimes present)
+    if hasattr(candidate, 'text'):
+        text_content = candidate.text
+    # Method 2: Check within candidate.content.parts (standard way)
+    elif hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+        for part in candidate.content.parts:
+            if hasattr(part, 'text'):
+                text_content = part.text # Use the first text part found
+                break
+    # Method 3: Direct text attribute on the root response object (less common)
+    elif hasattr(response, 'text'):
+        text_content = response.text
+
+    # Check the extracted text content
+    if text_content is None:
+        print("No text content found in response/candidates.")
+        return False
+    elif text_content == '':
+        print("Response text content is an empty string.")
+        # Decide if empty string is valid. For retry, maybe not.
+        return False # Treat empty string as invalid for retry
+    else:
+        # Non-empty text content found
+        return True # Valid response
+
+    # Fallback - should not be reached if logic above is correct
+    # print(f"Invalid response structure: No valid text found. {str(response)[:200]}...")
+    # return False # Covered by text_content is None check
+
+# --- Fake streaming implementation ---
+async def fake_stream_generator(model_name, prompt, current_gen_config, request):
+    """
+    Simulates streaming by making a non-streaming API call and chunking the response.
+    While waiting for the response, sends keep-alive messages to the client.
+    """
+    response_id = f"chatcmpl-{int(time.time())}"
+    
+    async def fake_stream_inner():
+        # Create a task for the non-streaming API call
+        print(f"FAKE STREAMING: Making non-streaming request to Gemini API (Model: {model_name})")
+        api_call_task = asyncio.create_task(
+            client.aio.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=current_gen_config,
+            )
+        )
+        
+        # Send keep-alive messages while waiting for the response
+        keep_alive_sent = 0
+        while not api_call_task.done():
+            # Create a keep-alive message
+            keep_alive_chunk = {
+                "id": "chatcmpl-keepalive",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": request.model,
+                "choices": [{"delta": {"content": ""}, "index": 0, "finish_reason": None}]
+            }
+            keep_alive_message = f"data: {json.dumps(keep_alive_chunk)}\n\n"
+            
+            # Send the keep-alive message
+            yield keep_alive_message
+            keep_alive_sent += 1
+            
+            # Wait before sending the next keep-alive message
+            await asyncio.sleep(config.FAKE_STREAMING_INTERVAL)
+        
+        try:
+            # Get the response from the completed task
+            response = api_call_task.result()
+            
+            # Check if the response is valid
+            if not is_response_valid(response):
+                raise ValueError("Invalid or empty response received")
+            
+            # Extract the full text content
+            full_text = ""
+            if hasattr(response, 'text'):
+                full_text = response.text
+            elif hasattr(response, 'candidates') and response.candidates:
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'text'):
+                    full_text = candidate.text
+                elif hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'text'):
+                            full_text += part.text
+            
+            if not full_text:
+                raise ValueError("No text content found in response")
+            
+            print(f"FAKE STREAMING: Received full response ({len(full_text)} chars), chunking into smaller pieces")
+            
+            # Split the full text into chunks
+            # Calculate a reasonable chunk size based on text length
+            # Aim for ~10 chunks, but with a minimum size of 20 chars
+            chunk_size = max(20, math.ceil(len(full_text) / 10))
+            
+            # Send each chunk as a separate SSE message
+            for i in range(0, len(full_text), chunk_size):
+                chunk_text = full_text[i:i+chunk_size]
+                chunk_data = {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "content": chunk_text
+                            },
+                            "finish_reason": None
+                        }
+                    ]
+                }
+                yield f"data: {json.dumps(chunk_data)}\n\n"
+                
+                # Small delay between chunks to simulate streaming
+                await asyncio.sleep(0.05)
+            
+            # Send the final chunk
+            yield create_final_chunk(request.model, response_id)
+            yield "data: [DONE]\n\n"
+            
+        except Exception as e:
+            error_msg = f"Error in fake streaming (Model: {model_name}): {str(e)}"
+            print(error_msg)
+            error_response = create_openai_error_response(500, error_msg, "server_error")
+            yield f"data: {json.dumps(error_response)}\n\n"
+            yield "data: [DONE]\n\n"
+    
+    return StreamingResponse(fake_stream_inner(), media_type="text/event-stream")
 
 # --- Need to import asyncio ---
 # import asyncio # Add this import at the top of the file # Already added below
