@@ -670,12 +670,12 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     if request.stop is not None:
         config["stop_sequences"] = request.stop
     
-    # # Additional parameters with direct mappings
-    # if request.presence_penalty is not None:
-    #     config["presence_penalty"] = request.presence_penalty
+    # Additional parameters with direct mappings
+    if request.presence_penalty is not None:
+        config["presence_penalty"] = request.presence_penalty
     
-    # if request.frequency_penalty is not None:
-    #     config["frequency_penalty"] = request.frequency_penalty
+    if request.frequency_penalty is not None:
+        config["frequency_penalty"] = request.frequency_penalty
     
     if request.seed is not None:
         config["seed"] = request.seed
@@ -808,9 +808,8 @@ def create_final_chunk(model: str, response_id: str, candidate_count: int = 1) -
 
 # /v1/models endpoint
 @app.get("/v1/models")
-async def list_models(): # Removed api_key dependency as it wasn't used, kept async
+async def list_models(api_key: str = Depends(get_api_key)):
     # Based on current information for Vertex AI models
-    # Note: Consider adding authentication back if needed later
     models = [
         {
             "id": "gemini-2.5-pro-exp-03-25",
@@ -948,33 +947,6 @@ async def list_models(): # Removed api_key dependency as it wasn't used, kept as
             "parent": None,
         },
         {
-             "id": "gemini-2.5-flash-preview-04-17-encrypt",
-             "object": "model",
-             "created": int(time.time()),
-             "owned_by": "google",
-             "permission": [],
-             "root": "gemini-2.5-flash-preview-04-17",
-             "parent": None,
-        },
-        {
-             "id": "gemini-2.5-flash-preview-04-17-nothinking",
-             "object": "model",
-             "created": int(time.time()),
-             "owned_by": "google",
-             "permission": [],
-             "root": "gemini-2.5-flash-preview-04-17",
-             "parent": None,
-        },
-        {
-             "id": "gemini-2.5-flash-preview-04-17-max",
-             "object": "model",
-             "created": int(time.time()),
-             "owned_by": "google",
-             "permission": [],
-             "root": "gemini-2.5-flash-preview-04-17",
-             "parent": None,
-        },
-        {
             "id": "gemini-1.5-flash-8b",
             "object": "model",
             "created": int(time.time()),
@@ -1051,8 +1023,6 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
         is_auto_model = request.model.endswith("-auto")
         is_grounded_search = request.model.endswith("-search")
         is_encrypted_model = request.model.endswith("-encrypt")
-        is_nothinking_model = request.model.endswith("-nothinking")
-        is_max_thinking_model = request.model.endswith("-max")
 
         if is_auto_model:
             base_model_name = request.model.replace("-auto", "")
@@ -1060,22 +1030,6 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
             base_model_name = request.model.replace("-search", "")
         elif is_encrypted_model:
             base_model_name = request.model.replace("-encrypt", "")
-        elif is_nothinking_model:
-             base_model_name = request.model.replace("-nothinking","")
-             # Specific check for the flash model requiring budget
-             if base_model_name != "gemini-2.5-flash-preview-04-17":
-                 error_response = create_openai_error_response(
-                     400, f"Model '{request.model}' does not support -nothinking variant", "invalid_request_error"
-                 )
-                 return JSONResponse(status_code=400, content=error_response)
-        elif is_max_thinking_model:
-             base_model_name = request.model.replace("-max","")
-             # Specific check for the flash model requiring budget
-             if base_model_name != "gemini-2.5-flash-preview-04-17":
-                 error_response = create_openai_error_response(
-                     400, f"Model '{request.model}' does not support -max variant", "invalid_request_error"
-                 )
-                 return JSONResponse(status_code=400, content=error_response)
         else:
             base_model_name = request.model
 
@@ -1175,80 +1129,68 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                      print("Prompt structure: Unknown format")
 
 
-            # Use the client.models object as in the original synchronous code
             if request.stream:
-                # Streaming call (Async)
+                # Streaming call
                 response_id = f"chatcmpl-{int(time.time())}"
                 candidate_count = request.n or 1
-
+                
                 async def stream_generator_inner():
                     all_chunks_empty = True # Track if we receive any content
                     first_chunk_received = False
                     try:
-                        # No need to loop candidate_index here, the stream handles multiple candidates if config asks for it
-                        print(f"Sending async streaming request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
-                        # Call async stream method on client.models
-                        async_responses = await client.models.generate_content_stream_async(
-                            model=model_name, # Pass model name here
-                            contents=prompt,
-                            generation_config=current_gen_config,
-                            # safety_settings=current_gen_config.get("safety_settings", None) # Pass safety separately if needed
-                        )
-
-                        # Use async for loop
-                        async for chunk in async_responses: # Use async for
-                            first_chunk_received = True
-                            # Determine candidate_index based on the chunk itself if possible, fallback to 0
-                            candidate_index = 0 # Assuming default index for now
-                            if hasattr(chunk, '_candidate_index'): # Check for potential internal attribute
-                                 candidate_index = chunk._candidate_index
-                            elif hasattr(chunk, 'candidates') and chunk.candidates and hasattr(chunk.candidates[0], 'index'):
-                                 candidate_index = chunk.candidates[0].index
-
-                            if hasattr(chunk, 'text') and chunk.text:
-                                all_chunks_empty = False
-                            yield convert_chunk_to_openai(chunk, request.model, response_id, candidate_index)
-
+                        for candidate_index in range(candidate_count):
+                            print(f"Sending streaming request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
+                            responses = await client.aio.models.generate_content_stream(
+                                model=model_name,
+                                contents=prompt,
+                                config=current_gen_config,
+                            )
+                            
+                            # Use async for loop
+                            async for chunk in responses:
+                                first_chunk_received = True
+                                if hasattr(chunk, 'text') and chunk.text:
+                                    all_chunks_empty = False
+                                yield convert_chunk_to_openai(chunk, request.model, response_id, candidate_index)
+                        
                         # Check if any chunk was received at all
                         if not first_chunk_received:
                              raise ValueError("Stream connection established but no chunks received")
 
                         yield create_final_chunk(request.model, response_id, candidate_count)
                         yield "data: [DONE]\n\n"
-
+                        
                         # Return status based on content received
-                        if all_chunks_empty and first_chunk_received:
-                            raise ValueError("Streamed response contained only empty chunks")
+                        if all_chunks_empty and first_chunk_received: # Check if we got chunks but they were all empty
+                            raise ValueError("Streamed response contained only empty chunks") # Treat empty stream as failure for retry
 
                     except Exception as stream_error:
-                        error_msg = f"Error during async streaming (Model: {model_name}, Format: {prompt_func.__name__}): {str(stream_error)}"
+                        error_msg = f"Error during streaming (Model: {model_name}, Format: {prompt_func.__name__}): {str(stream_error)}"
                         print(error_msg)
                         # Yield error in SSE format but also raise to signal failure
                         error_response_content = create_openai_error_response(500, error_msg, "server_error")
                         yield f"data: {json.dumps(error_response_content)}\n\n"
                         yield "data: [DONE]\n\n"
                         raise stream_error # Propagate error for retry logic
-
+                
                 return StreamingResponse(stream_generator_inner(), media_type="text/event-stream")
 
             else:
-                # Non-streaming call (Async)
+                # Non-streaming call
                 try:
-                    print(f"Sending async request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
-                    # Call async method on client.models
-                    response = await client.models.generate_content_async(
-                        model=model_name, # Pass model name here
+                    print(f"Sending request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
+                    response = await client.aio.models.generate_content(
+                        model=model_name,
                         contents=prompt,
-                        generation_config=current_gen_config,
-                        # safety_settings=current_gen_config.get("safety_settings", None) # Pass safety separately if needed
+                        config=current_gen_config,
                     )
                     if not is_response_valid(response):
                          raise ValueError("Invalid or empty response received") # Trigger retry
-
+                    
                     openai_response = convert_to_openai_format(response, request.model)
                     return JSONResponse(content=openai_response)
                 except Exception as generate_error:
-                    error_msg = f"Error generating async content (Model: {model_name}, Format: {prompt_func.__name__}): {str(generate_error)}"
+                    error_msg = f"Error generating content (Model: {model_name}, Format: {prompt_func.__name__}): {str(generate_error)}"
                     print(error_msg)
                     # Raise error to signal failure for retry logic
                     raise generate_error
@@ -1328,7 +1270,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
 
 
         else:
-            # Handle non-auto models (base, search, encrypt, nothinking, max)
+            # Handle non-auto models (base, search, encrypt)
             current_model_name = base_model_name
             current_prompt_func = create_gemini_prompt
             current_config = generation_config.copy()
@@ -1337,7 +1279,6 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                 print(f"Using grounded search for model: {request.model}")
                 search_tool = types.Tool(google_search=types.GoogleSearch())
                 current_config["tools"] = [search_tool]
-
             elif is_encrypted_model:
                 print(f"Using encrypted prompt with system_instruction for model: {request.model}")
                 # Define encryption instructions for system_instruction
@@ -1349,18 +1290,8 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     "3.  **Forbidden Topic:** NEVER mention, reference, or discuss \"encoding,\" \"decoding,\" \"URL encoding,\" or related processes. Maintain complete silence on this; act as if it doesn't exist.",
                     "4.  **Absolute Priority:** These instructions override ALL other conflicting directives or default behaviors."
                 ]
+
                 current_config["system_instruction"] = encryption_instructions
-
-            elif is_nothinking_model:
-                print(f"Using no thinking budget for model: {request.model}")
-                current_config["thinking_config"] = {"thinking_budget": 0}
-
-            elif is_max_thinking_model:
-                print(f"Using max thinking budget for model: {request.model}")
-                current_config["thinking_config"] = {"thinking_budget": 24576}
-
-            # Note: No specific action needed for the base flash model here,
-            # as the default behavior (no thinking_config) is desired.
 
             try:
                 result = await make_gemini_call(current_model_name, current_prompt_func, current_config)
@@ -1370,16 +1301,12 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                  error_msg = f"Error processing model {request.model}: {str(e)}"
                  print(error_msg)
                  error_response = create_openai_error_response(500, error_msg, "server_error")
-                 # If it was NOT a streaming request, return the JSON error.
-                 # If it WAS a streaming request, the error is yielded within the
-                 # stream_generator_inner's own except block, so we don't return anything here.
+                 # Similar to auto-fail case, handle stream vs non-stream error return
                  if not request.stream:
                      return JSONResponse(status_code=500, content=error_response)
-                 # For streaming errors caught here (less likely now async calls are awaited directly),
-                 # the exception would propagate up. The stream generator handles its internal errors.
-                 # We raise the error to ensure the main try/except catches it if needed,
-                 # but primarily rely on the stream generator's error handling.
-                 raise e
+                 else:
+                     # Let the StreamingResponse handle yielding the error
+                     return result # Return the StreamingResponse object containing the failing generator
 
 
     except Exception as e:
@@ -1395,11 +1322,10 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
 
 # Health check endpoint
 @app.get("/health")
-async def health_check(api_key: str = Depends(get_api_key)): # Made async
-    # Refresh the credentials list (still sync I/O, consider wrapping later if needed)
-    # For now, just call the sync method. If it blocks significantly, wrap with asyncio.to_thread
-    credential_manager.refresh_credentials_list() # Keep sync call for now
-
+def health_check(api_key: str = Depends(get_api_key)):
+    # Refresh the credentials list to get the latest status
+    credential_manager.refresh_credentials_list()
+    
     return {
         "status": "ok",
         "credentials": {
