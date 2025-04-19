@@ -1320,7 +1320,18 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
 # --- Need to import asyncio ---
 # import asyncio # Add this import at the top of the file # Already added below
 
-# Health check endpoint
+# Root endpoint for basic status check
+@app.get("/")
+async def root():
+    # Optionally, add a check here to see if the client initialized successfully
+    client_status = "initialized" if client else "not initialized"
+    return {
+        "status": "ok",
+        "message": "OpenAI to Gemini Adapter is running.",
+        "vertex_ai_client": client_status
+    }
+
+# Health check endpoint (requires API key)
 @app.get("/health")
 def health_check(api_key: str = Depends(get_api_key)):
     # Refresh the credentials list to get the latest status
