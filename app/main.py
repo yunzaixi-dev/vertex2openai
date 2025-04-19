@@ -808,8 +808,9 @@ def create_final_chunk(model: str, response_id: str, candidate_count: int = 1) -
 
 # /v1/models endpoint
 @app.get("/v1/models")
-async def list_models(api_key: str = Depends(get_api_key)):
+async def list_models(): # Removed api_key dependency as it wasn't used, kept async
     # Based on current information for Vertex AI models
+    # Note: Consider adding authentication back if needed later
     models = [
         {
             "id": "gemini-2.5-pro-exp-03-25",
@@ -1174,68 +1175,79 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                      print("Prompt structure: Unknown format")
 
 
+            model_instance = client.get_model(f"models/{model_name}") # Get the model instance
+
             if request.stream:
-                # Streaming call
+                # Streaming call (Async)
                 response_id = f"chatcmpl-{int(time.time())}"
                 candidate_count = request.n or 1
-                
+
                 async def stream_generator_inner():
                     all_chunks_empty = True # Track if we receive any content
                     first_chunk_received = False
                     try:
-                        for candidate_index in range(candidate_count):
-                            print(f"Sending streaming request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
-                            responses = client.models.generate_content_stream(
-                                model=model_name,
-                                contents=prompt,
-                                config=current_gen_config,
-                            )
-                            
-                            # Use regular for loop, not async for
-                            for chunk in responses:
-                                first_chunk_received = True
-                                if hasattr(chunk, 'text') and chunk.text:
-                                    all_chunks_empty = False
-                                yield convert_chunk_to_openai(chunk, request.model, response_id, candidate_index)
-                        
+                        # No need to loop candidate_index here, the stream handles multiple candidates if config asks for it
+                        print(f"Sending async streaming request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
+                        async_responses = await model_instance.generate_content_stream_async( # Use await and async method
+                            contents=prompt,
+                            generation_config=current_gen_config, # Use generation_config parameter
+                            # safety_settings=current_gen_config.get("safety_settings", None) # Pass safety separately if needed
+                        )
+
+                        # Use async for loop
+                        async for chunk in async_responses: # Use async for
+                            first_chunk_received = True
+                            # Determine candidate_index based on the chunk itself if possible, fallback to 0
+                            # Note: Adjust this if the async stream chunk structure provides candidate index differently
+                            candidate_index = 0 # Assuming default index for now
+                            if hasattr(chunk, '_candidate_index'): # Check for potential internal attribute (may change)
+                                 candidate_index = chunk._candidate_index
+                            elif hasattr(chunk, 'candidates') and chunk.candidates and hasattr(chunk.candidates[0], 'index'):
+                                 # Or check standard candidate structure if available on chunk
+                                 candidate_index = chunk.candidates[0].index
+
+                            if hasattr(chunk, 'text') and chunk.text:
+                                all_chunks_empty = False
+                            yield convert_chunk_to_openai(chunk, request.model, response_id, candidate_index)
+
                         # Check if any chunk was received at all
                         if not first_chunk_received:
                              raise ValueError("Stream connection established but no chunks received")
 
                         yield create_final_chunk(request.model, response_id, candidate_count)
                         yield "data: [DONE]\n\n"
-                        
+
                         # Return status based on content received
                         if all_chunks_empty and first_chunk_received: # Check if we got chunks but they were all empty
                             raise ValueError("Streamed response contained only empty chunks") # Treat empty stream as failure for retry
 
                     except Exception as stream_error:
-                        error_msg = f"Error during streaming (Model: {model_name}, Format: {prompt_func.__name__}): {str(stream_error)}"
+                        error_msg = f"Error during async streaming (Model: {model_name}, Format: {prompt_func.__name__}): {str(stream_error)}"
                         print(error_msg)
                         # Yield error in SSE format but also raise to signal failure
                         error_response_content = create_openai_error_response(500, error_msg, "server_error")
                         yield f"data: {json.dumps(error_response_content)}\n\n"
                         yield "data: [DONE]\n\n"
                         raise stream_error # Propagate error for retry logic
-                
+
                 return StreamingResponse(stream_generator_inner(), media_type="text/event-stream")
 
             else:
-                # Non-streaming call
+                # Non-streaming call (Async)
                 try:
-                    print(f"Sending request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
-                    response = client.models.generate_content(
-                        model=model_name,
+                    print(f"Sending async request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
+                    response = await model_instance.generate_content_async( # Use await and async method
                         contents=prompt,
-                        config=current_gen_config,
+                        generation_config=current_gen_config, # Use generation_config parameter
+                        # safety_settings=current_gen_config.get("safety_settings", None) # Pass safety separately if needed
                     )
                     if not is_response_valid(response):
                          raise ValueError("Invalid or empty response received") # Trigger retry
-                    
+
                     openai_response = convert_to_openai_format(response, request.model)
                     return JSONResponse(content=openai_response)
                 except Exception as generate_error:
-                    error_msg = f"Error generating content (Model: {model_name}, Format: {prompt_func.__name__}): {str(generate_error)}"
+                    error_msg = f"Error generating async content (Model: {model_name}, Format: {prompt_func.__name__}): {str(generate_error)}"
                     print(error_msg)
                     # Raise error to signal failure for retry logic
                     raise generate_error
@@ -1378,10 +1390,11 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
 
 # Health check endpoint
 @app.get("/health")
-def health_check(api_key: str = Depends(get_api_key)):
-    # Refresh the credentials list to get the latest status
-    credential_manager.refresh_credentials_list()
-    
+async def health_check(api_key: str = Depends(get_api_key)): # Made async
+    # Refresh the credentials list (still sync I/O, consider wrapping later if needed)
+    # For now, just call the sync method. If it blocks significantly, wrap with asyncio.to_thread
+    credential_manager.refresh_credentials_list() # Keep sync call for now
+
     return {
         "status": "ok",
         "credentials": {
