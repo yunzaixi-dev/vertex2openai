@@ -184,9 +184,9 @@ class OpenAIRequest(BaseModel):
     # Allow extra fields to pass through without causing validation errors
     model_config = ConfigDict(extra='allow')
 
-# Configure authentication
+# Configure authentication - Initializes a fallback client and validates credential sources
 def init_vertex_ai():
-    global client # Ensure we modify the global client variable
+    global client # This will hold the fallback client if initialized
     try:
         # Priority 1: Check for credentials JSON content in environment variable (Hugging Face)
         credentials_json_str = os.environ.get("GOOGLE_CREDENTIALS_JSON")
@@ -224,36 +224,51 @@ def init_vertex_ai():
                 
                 # Initialize the client with the credentials
                 try:
-                    client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
-                    # print(f"Initialized Vertex AI using GOOGLE_CREDENTIALS_JSON env var for project: {project_id}") # Reduced verbosity
+                    # Initialize the global client ONLY if it hasn't been set yet
+                    if client is None:
+                        client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
+                        print(f"INFO: Initialized fallback Vertex AI client using GOOGLE_CREDENTIALS_JSON env var for project: {project_id}")
+                    else:
+                         print(f"INFO: Fallback client already initialized. GOOGLE_CREDENTIALS_JSON credentials validated for project: {project_id}")
+                    # Even if client was already set, we return True because this method worked
+                    return True
                 except Exception as client_err:
-                    print(f"ERROR: Failed to initialize genai.Client from GOOGLE_CREDENTIALS_JSON: {client_err}") # Added context
+                    print(f"ERROR: Failed to initialize genai.Client from GOOGLE_CREDENTIALS_JSON: {client_err}")
                     raise
-                return True
             except Exception as e:
-                # print(f"Error loading credentials from GOOGLE_CREDENTIALS_JSON: {e}") # Reduced verbosity, error logged above
-                pass # Add pass to avoid empty block error
+                print(f"WARNING: Error processing GOOGLE_CREDENTIALS_JSON: {e}. Will try other methods.")
                 # Fall through to other methods if this fails
         
         # Priority 2: Try to use the credential manager to get credentials from files
         # print(f"Trying credential manager (directory: {credential_manager.credentials_dir})") # Reduced verbosity
-        credentials, project_id = credential_manager.get_next_credentials()
-        
-        if credentials and project_id:
+        # Priority 2: Try to use the credential manager to get credentials from files
+        # We call get_next_credentials here mainly to validate it works and log the first file found
+        # The actual rotation happens per-request
+        print(f"INFO: Checking Credential Manager (directory: {credential_manager.credentials_dir})")
+        cm_credentials, cm_project_id = credential_manager.get_next_credentials() # Use temp vars
+
+        if cm_credentials and cm_project_id:
             try:
-                client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
-                # print(f"Initialized Vertex AI using Credential Manager for project: {project_id}") # Reduced verbosity
-                return True
+                # Initialize the global client ONLY if it hasn't been set yet
+                if client is None:
+                    client = genai.Client(vertexai=True, credentials=cm_credentials, project=cm_project_id, location="us-central1")
+                    print(f"INFO: Initialized fallback Vertex AI client using Credential Manager for project: {cm_project_id}")
+                    return True # Successfully initialized global client
+                else:
+                    print(f"INFO: Fallback client already initialized. Credential Manager validated for project: {cm_project_id}")
+                    # Don't return True here if client was already set, let it fall through to check GAC
             except Exception as e:
-                print(f"ERROR: Failed to initialize client with credentials from Credential Manager file ({credential_manager.credentials_dir}): {e}") # Added context
-        
+                print(f"ERROR: Failed to initialize client with credentials from Credential Manager file ({credential_manager.credentials_dir}): {e}")
+        else:
+             print(f"INFO: No credentials loaded via Credential Manager.")
+
         # Priority 3: Fall back to GOOGLE_APPLICATION_CREDENTIALS environment variable (file path)
         file_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
         if file_path:
-            # print(f"Checking GOOGLE_APPLICATION_CREDENTIALS file path: {file_path}") # Reduced verbosity
+            print(f"INFO: Checking GOOGLE_APPLICATION_CREDENTIALS file path: {file_path}")
             if os.path.exists(file_path):
                 try:
-                    # print(f"File exists, attempting to load credentials") # Reduced verbosity
+                    print(f"INFO: File exists, attempting to load credentials")
                     credentials = service_account.Credentials.from_service_account_file(
                         file_path,
                         scopes=['https://www.googleapis.com/auth/cloud-platform']
@@ -262,19 +277,29 @@ def init_vertex_ai():
                     print(f"Successfully loaded credentials from file for project: {project_id}")
                     
                     try:
-                        client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
-                        # print(f"Initialized Vertex AI using GOOGLE_APPLICATION_CREDENTIALS file path for project: {project_id}") # Reduced verbosity
-                        return True
+                        # Initialize the global client ONLY if it hasn't been set yet
+                        if client is None:
+                            client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
+                            print(f"INFO: Initialized fallback Vertex AI client using GOOGLE_APPLICATION_CREDENTIALS file path for project: {project_id}")
+                            return True # Successfully initialized global client
+                        else:
+                            print(f"INFO: Fallback client already initialized. GOOGLE_APPLICATION_CREDENTIALS validated for project: {project_id}")
+                            # If client was already set, we don't need to return True, just let it finish
                     except Exception as client_err:
-                        print(f"ERROR: Failed to initialize client with credentials from GOOGLE_APPLICATION_CREDENTIALS file ({file_path}): {client_err}") # Added context
+                        print(f"ERROR: Failed to initialize client with credentials from GOOGLE_APPLICATION_CREDENTIALS file ({file_path}): {client_err}")
                 except Exception as e:
                     print(f"ERROR: Failed to load credentials from GOOGLE_APPLICATION_CREDENTIALS path ({file_path}): {e}") # Added context
             else:
                 print(f"ERROR: GOOGLE_APPLICATION_CREDENTIALS file does not exist at path: {file_path}")
         
         # If none of the methods worked, this error is still useful
-        # print(f"ERROR: No valid credentials found. Tried GOOGLE_CREDENTIALS_JSON, Credential Manager ({credential_manager.credentials_dir}), and GOOGLE_APPLICATION_CREDENTIALS.")
-        return False
+        # If we reach here, either no method worked, or a prior method already initialized the client
+        if client is not None:
+             print("INFO: Fallback client initialization check complete.")
+             return True # A fallback client exists
+        else:
+             print(f"ERROR: No valid credentials found or failed to initialize client. Tried GOOGLE_CREDENTIALS_JSON, Credential Manager ({credential_manager.credentials_dir}), and GOOGLE_APPLICATION_CREDENTIALS.")
+             return False
     except Exception as e:
         print(f"Error initializing authentication: {e}")
         return False
@@ -283,9 +308,9 @@ def init_vertex_ai():
 @app.on_event("startup")
 async def startup_event():
     if init_vertex_ai():
-        print("INFO: Vertex AI client successfully initialized.")
+        print("INFO: Fallback Vertex AI client initialization check completed successfully.")
     else:
-        print("ERROR: Failed to initialize Vertex AI client. Please check credential configuration (GOOGLE_CREDENTIALS_JSON, /app/credentials/*.json, or GOOGLE_APPLICATION_CREDENTIALS) and logs for details.")
+        print("ERROR: Failed to initialize a fallback Vertex AI client. API will likely fail. Please check credential configuration (GOOGLE_CREDENTIALS_JSON, /app/credentials/*.json, or GOOGLE_APPLICATION_CREDENTIALS) and logs for details.")
 
 # Conversion functions
 # Define supported roles for Gemini API
@@ -651,11 +676,11 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
         config["stop_sequences"] = request.stop
     
     # Additional parameters with direct mappings
-    if request.presence_penalty is not None:
-        config["presence_penalty"] = request.presence_penalty
+    # if request.presence_penalty is not None:
+    #     config["presence_penalty"] = request.presence_penalty
     
-    if request.frequency_penalty is not None:
-        config["frequency_penalty"] = request.frequency_penalty
+    # if request.frequency_penalty is not None:
+    #     config["frequency_penalty"] = request.frequency_penalty
     
     if request.seed is not None:
         config["seed"] = request.seed
@@ -988,7 +1013,7 @@ def create_openai_error_response(status_code: int, message: str, error_type: str
     }
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_api_key)):
+async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_api_key)): # Add request parameter
     try:
         # Validate model availability
         models_response = await list_models()
@@ -1016,14 +1041,32 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
         # Create generation config
         generation_config = create_generation_config(request)
 
-        # Use the globally initialized client (from startup)
-        global client
-        if client is None:
-            error_response = create_openai_error_response(
-                500, "Vertex AI client not initialized", "server_error"
-            )
-            return JSONResponse(status_code=500, content=error_response)
-        print(f"Using globally initialized client.")
+        # --- Determine which client to use (Rotation or Fallback) ---
+        client_to_use = None
+        rotated_credentials, rotated_project_id = credential_manager.get_next_credentials()
+
+        if rotated_credentials and rotated_project_id:
+            try:
+                # Create a request-specific client using the rotated credentials
+                client_to_use = genai.Client(vertexai=True, credentials=rotated_credentials, project=rotated_project_id, location="us-central1")
+                print(f"INFO: Using rotated credential for project: {rotated_project_id} (Index: {credential_manager.current_index -1 if credential_manager.current_index > 0 else len(credential_manager.credentials_files) - 1})") # Log which credential was used
+            except Exception as e:
+                print(f"ERROR: Failed to create client from rotated credential: {e}. Will attempt fallback.")
+                client_to_use = None # Ensure it's None if creation failed
+
+        # If rotation failed or wasn't possible, try the fallback client
+        if client_to_use is None:
+            global client # Access the fallback client initialized at startup
+            if client is not None:
+                client_to_use = client
+                print("INFO: Using fallback Vertex AI client.")
+            else:
+                # Critical error: No rotated client AND no fallback client
+                error_response = create_openai_error_response(
+                    500, "Vertex AI client not available (Rotation failed and no fallback)", "server_error"
+                )
+                return JSONResponse(status_code=500, content=error_response)
+        # --- Client determined ---
 
         # Common safety settings
         safety_settings = [
@@ -1036,7 +1079,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
 
             
         # --- Helper function to make the API call (handles stream/non-stream) ---
-        async def make_gemini_call(model_name, prompt_func, current_gen_config):
+        async def make_gemini_call(client_instance, model_name, prompt_func, current_gen_config): # Add client_instance parameter
             prompt = prompt_func(request.messages)
             
             # Log prompt structure
@@ -1058,7 +1101,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                 # Check if fake streaming is enabled (directly from environment variable)
                 fake_streaming = os.environ.get("FAKE_STREAMING", "false").lower() == "true"
                 if fake_streaming:
-                    return await fake_stream_generator(model_name, prompt, current_gen_config, request)
+                    return await fake_stream_generator(client_instance, model_name, prompt, current_gen_config, request) # Pass client_instance
                 
                 # Regular streaming call
                 response_id = f"chatcmpl-{int(time.time())}"
@@ -1070,7 +1113,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     try:
                         for candidate_index in range(candidate_count):
                             print(f"Sending streaming request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
-                            responses = await client.aio.models.generate_content_stream(
+                            responses = await client_instance.aio.models.generate_content_stream( # Use client_instance
                                 model=model_name,
                                 contents=prompt,
                                 config=current_gen_config,
@@ -1109,7 +1152,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                 # Non-streaming call
                 try:
                     print(f"Sending request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
-                    response = await client.aio.models.generate_content(
+                    response = await client_instance.aio.models.generate_content( # Use client_instance
                         model=model_name,
                         contents=prompt,
                         config=current_gen_config,
@@ -1152,7 +1195,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                 current_config = attempt["config_modifier"](generation_config.copy())
                 
                 try:
-                    result = await make_gemini_call(attempt["model"], attempt["prompt_func"], current_config)
+                    result = await make_gemini_call(client_to_use, attempt["model"], attempt["prompt_func"], current_config) # Pass client_to_use
                     
                     # For streaming, the result is StreamingResponse, success is determined inside make_gemini_call raising an error on failure
                     # For non-streaming, if make_gemini_call doesn't raise, it's successful
@@ -1230,7 +1273,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                 current_config["system_instruction"] = encryption_instructions
 
             try:
-                result = await make_gemini_call(current_model_name, current_prompt_func, current_config)
+                result = await make_gemini_call(client_to_use, current_model_name, current_prompt_func, current_config) # Pass client_to_use
                 return result
             except Exception as e:
                  # Handle potential errors for non-auto models
@@ -1326,7 +1369,7 @@ def is_response_valid(response):
     return False
 
 # --- Fake streaming implementation ---
-async def fake_stream_generator(model_name, prompt, current_gen_config, request):
+async def fake_stream_generator(client_instance, model_name, prompt, current_gen_config, request): # Add client_instance parameter
     """
     Simulates streaming by making a non-streaming API call and chunking the response.
     While waiting for the response, sends keep-alive messages to the client.
@@ -1337,7 +1380,7 @@ async def fake_stream_generator(model_name, prompt, current_gen_config, request)
         # Create a task for the non-streaming API call
         print(f"FAKE STREAMING: Making non-streaming request to Gemini API (Model: {model_name})")
         api_call_task = asyncio.create_task(
-            client.aio.models.generate_content(
+            client_instance.aio.models.generate_content( # Use client_instance
                 model=model_name,
                 contents=prompt,
                 config=current_gen_config,
