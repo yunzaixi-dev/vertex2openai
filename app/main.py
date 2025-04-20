@@ -446,6 +446,11 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> Union[types.Content, 
     
     # Process all messages in their original order
     for idx, message in enumerate(messages):
+        # Skip messages with empty content
+        if not message.content:
+            print(f"Skipping message {idx} due to empty content (Role: {message.role})")
+            continue
+
         # Map OpenAI roles to Gemini roles
         role = message.role
         
@@ -479,7 +484,8 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> Union[types.Content, 
             for part in message.content:
                 if isinstance(part, dict):
                     if part.get('type') == 'text':
-                        parts.append(types.Part(text=part.get('text', '')))
+                        print("Empty message detected. Auto fill in.")
+                        parts.append(types.Part(text=part.get('text', '\n')))
                     elif part.get('type') == 'image_url':
                         image_url = part.get('image_url', {}).get('url', '')
                         if image_url.startswith('data:'):
@@ -1113,6 +1119,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     try:
                         for candidate_index in range(candidate_count):
                             print(f"Sending streaming request to Gemini API (Model: {model_name}, Prompt Format: {prompt_func.__name__})")
+                            # print(prompt)
                             responses = await client_instance.aio.models.generate_content_stream( # Use client_instance
                                 model=model_name,
                                 contents=prompt,
