@@ -790,7 +790,7 @@ def create_encrypted_full_gemini_prompt(messages: List[OpenAIMessage]) -> Union[
              processed_messages.append(OpenAIMessage(role="user", content=OBFUSCATION_PROMPT))
              print("INFO: Obfuscation prompt added as the first message (edge case).")
         # If there are messages but none are user/system, the prompt is not added (according to original logic interpretation)
-        return create_encrypted_gemini_prompt(processed_messages)
+    return create_encrypted_gemini_prompt(processed_messages)
 
 
 
