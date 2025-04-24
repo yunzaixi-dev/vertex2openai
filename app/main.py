@@ -935,6 +935,7 @@ def deobfuscate_text(text: str) -> str:
     text = text.replace("♩", "")
     text = text.replace("`♡`", "") # Handle the backtick version too
     text = text.replace("♡", "")
+    text = text.replace("``", "")
     return text
 
 # --- Response Format Conversion ---
