@@ -932,10 +932,26 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
 def deobfuscate_text(text: str) -> str:
     """Removes specific obfuscation characters from text."""
     if not text: return text
+    # Define a placeholder unlikely to be in the text
+    placeholder = "___TRIPLE_BACKTICK_PLACEHOLDER___"
+
+    # Protect triple backticks
+    text = text.replace("```", placeholder)
+    # Remove double backticks
+    text = text.replace("``", "")
+    
+
+    # Remove other obfuscation characters
     text = text.replace("♩", "")
     text = text.replace("`♡`", "") # Handle the backtick version too
     text = text.replace("♡", "")
+    text = text.replace("` `", "")
     text = text.replace("``", "")
+    text = text.replace("`", "")
+
+    # Restore triple backticks
+    text = text.replace(placeholder, "```")
+
     return text
 
 # --- Response Format Conversion ---
