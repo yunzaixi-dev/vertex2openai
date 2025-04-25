@@ -579,29 +579,29 @@ Ready for your request."""
         )
     ]
     
-    # --- Find the index of the single assistant message to encrypt ---
-    target_assistant_index = -1
-    num_messages = len(messages)
-    for i in range(num_messages - 1, -1, -1): # Iterate backwards
-        if messages[i].role == 'assistant':
-            # Condition 1: Is assistant message - met.
-            # Condition 2: Not the last message overall?
-            is_last_overall = (i == num_messages - 1)
-            if is_last_overall:
-                continue # Cannot be the target if it's the last message
+    # # --- Find the index of the single assistant message to encrypt ---
+    # target_assistant_index = -1
+    # num_messages = len(messages)
+    # for i in range(num_messages - 1, -1, -1): # Iterate backwards
+    #     if messages[i].role == 'assistant':
+    #         # Condition 1: Is assistant message - met.
+    #         # Condition 2: Not the last message overall?
+    #         is_last_overall = (i == num_messages - 1)
+    #         if is_last_overall:
+    #             continue # Cannot be the target if it's the last message
 
-            # Condition 3: Has a user/system message after it?
-            has_user_system_after = False
-            for k in range(i + 1, num_messages):
-                if messages[k].role in ['user', 'system']:
-                    has_user_system_after = True
-                    break
+    #         # Condition 3: Has a user/system message after it?
+    #         has_user_system_after = False
+    #         for k in range(i + 1, num_messages):
+    #             if messages[k].role in ['user', 'system']:
+    #                 has_user_system_after = True
+    #                 break
             
-            if has_user_system_after:
-                # This is the last assistant message meeting all criteria
-                target_assistant_index = i
-                print(f"DEBUG: Identified target assistant message for encoding at index {target_assistant_index}")
-                break # Found the target, stop searching
+    #         if has_user_system_after:
+    #             # This is the last assistant message meeting all criteria
+    #             target_assistant_index = i
+    #             print(f"DEBUG: Identified target assistant message for encoding at index {target_assistant_index}")
+    #             break # Found the target, stop searching
 
     # --- Create the new message list with specific encoding ---
     new_messages = []
@@ -618,13 +618,13 @@ Ready for your request."""
         
         if message.role == "user":
             encode_this_message = True
-            print(f"DEBUG: Encoding user message (index {i})")
-        elif message.role == "assistant" and i == target_assistant_index:
-            encode_this_message = True
-            print(f"DEBUG: Encoding target assistant message (index {i})")
+            # print(f"DEBUG: Encoding user message (index {i})")
+        # elif message.role == "assistant" and i == target_assistant_index:
+        #     encode_this_message = True
+        #     print(f"DEBUG: Encoding target assistant message (index {i})")
         else:
             # Keep system, other assistant, tool messages as is
-            print(f"DEBUG: Passing through message (index {i}, role {message.role}) without encoding")
+            # print(f"DEBUG: Passing through message (index {i}, role {message.role}) without encoding")
             new_messages.append(message)
             continue # Skip encoding logic below for this message
 
