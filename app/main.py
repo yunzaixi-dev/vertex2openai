@@ -1249,6 +1249,33 @@ async def list_models(api_key: str = Depends(get_api_key)):
             "parent": None,
         },
         {
+            "id": "gemini-2.5-flash-preview-04-17-encrypt",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-flash-preview-04-17",
+            "parent": None,
+        },
+        {
+            "id": "gemini-2.5-flash-preview-04-17-nothinking",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-flash-preview-04-17",
+            "parent": None,
+        },
+        {
+            "id": "gemini-2.5-flash-preview-04-17-max",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-flash-preview-04-17",
+            "parent": None,
+        },
+        {
             "id": "gemini-1.5-flash-8b",
             "object": "model",
             "created": int(time.time()),
@@ -1326,6 +1353,8 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
         is_grounded_search = request.model.endswith("-search")
         is_encrypted_model = request.model.endswith("-encrypt")
         is_encrypted_full_model = request.model.endswith("-encrypt-full")
+        is_nothinking_model = request.model.endswith("-nothinking")
+        is_max_thinking_model = request.model.endswith("-max")
 
         if is_auto_model:
             base_model_name = request.model.replace("-auto", "")
@@ -1335,6 +1364,22 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
             base_model_name = request.model.replace("-encrypt", "")
         elif is_encrypted_full_model:
             base_model_name = request.model.replace("-encrypt-full", "")
+        elif is_nothinking_model:
+            base_model_name = request.model.replace("-nothinking","")
+            # Specific check for the flash model requiring budget
+            if base_model_name != "gemini-2.5-flash-preview-04-17":
+                error_response = create_openai_error_response(
+                    400, f"Model '{request.model}' does not support -nothinking variant", "invalid_request_error"
+                )
+                return JSONResponse(status_code=400, content=error_response)
+        elif is_max_thinking_model:
+            base_model_name = request.model.replace("-max","")
+            # Specific check for the flash model requiring budget
+            if base_model_name != "gemini-2.5-flash-preview-04-17":
+                error_response = create_openai_error_response(
+                    400, f"Model '{request.model}' does not support -max variant", "invalid_request_error"
+                )
+                return JSONResponse(status_code=400, content=error_response)
         else:
             base_model_name = request.model
 
@@ -1585,6 +1630,13 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                 ]
                 current_config["system_instruction"] = encryption_instructions
                 current_prompt_func = create_encrypted_full_gemini_prompt
+            elif is_nothinking_model:
+                print(f"Using no thinking budget for model: {request.model}")
+                current_config["thinking_config"] = {"thinking_budget": 0}
+ 
+            elif is_max_thinking_model:
+                print(f"Using max thinking budget for model: {request.model}")
+                current_config["thinking_config"] = {"thinking_budget": 24576}
             
 
             try:
