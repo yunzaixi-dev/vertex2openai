@@ -15,6 +15,8 @@ import random
 import urllib.parse
 from google.oauth2 import service_account
 import config
+import openai # Added import
+from google.auth.transport.requests import Request as AuthRequest # Added import
 
 from google.genai import types
 
@@ -1149,6 +1151,15 @@ async def list_models(api_key: str = Depends(get_api_key)):
             "root": "gemini-2.5-pro-exp-03-25",
             "parent": None,
         },
+        { # Added new model entry for OpenAI endpoint
+            "id": "gemini-2.5-pro-exp-03-25-openai",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-exp-03-25", # Underlying model
+            "parent": None,
+        },
         {
             "id": "gemini-2.5-pro-preview-03-25",
             "object": "model",
@@ -1336,6 +1347,15 @@ def create_openai_error_response(status_code: int, message: str, error_type: str
         }
     }
 
+# Helper for token refresh
+def _refresh_auth(credentials):
+    try:
+        credentials.refresh(AuthRequest())
+        return credentials.token
+    except Exception as e:
+        print(f"Error refreshing GCP token: {e}")
+        return None
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_api_key)): # Add request parameter
     try:
@@ -1348,38 +1368,232 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
             )
             return JSONResponse(status_code=400, content=error_response)
 
-        # Check model type and extract base model name
-        is_auto_model = request.model.endswith("-auto")
-        is_grounded_search = request.model.endswith("-search")
-        is_encrypted_model = request.model.endswith("-encrypt")
-        is_encrypted_full_model = request.model.endswith("-encrypt-full")
-        is_nothinking_model = request.model.endswith("-nothinking")
-        is_max_thinking_model = request.model.endswith("-max")
+        # --- Handle specific OpenAI client model ---
+        if request.model.endswith("-openai"): # Generalized check for suffix
+            print(f"INFO: Using OpenAI library path for model: {request.model}")
+            base_model_name = request.model.replace("-openai", "") # Extract base model name
+            UNDERLYING_MODEL_ID = f"google/{base_model_name}" # Add google/ prefix
 
-        if is_auto_model:
-            base_model_name = request.model.replace("-auto", "")
-        elif is_grounded_search:
-            base_model_name = request.model.replace("-search", "")
-        elif is_encrypted_model:
-            base_model_name = request.model.replace("-encrypt", "")
-        elif is_encrypted_full_model:
-            base_model_name = request.model.replace("-encrypt-full", "")
-        elif is_nothinking_model:
-            base_model_name = request.model.replace("-nothinking","")
+            # --- Determine Credentials for OpenAI Client (Correct Priority) ---
+            credentials_to_use = None
+            project_id_to_use = None
+            credential_source = "unknown"
+
+            # Priority 1: GOOGLE_CREDENTIALS_JSON (JSON String in Env Var)
+            credentials_json_str = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+            if credentials_json_str:
+                try:
+                    credentials_info = json.loads(credentials_json_str)
+                    if not isinstance(credentials_info, dict): raise ValueError("JSON is not a dict")
+                    required = ["type", "project_id", "private_key_id", "private_key", "client_email"]
+                    if any(f not in credentials_info for f in required): raise ValueError("Missing required fields")
+
+                    credentials = service_account.Credentials.from_service_account_info(
+                        credentials_info, scopes=['https://www.googleapis.com/auth/cloud-platform']
+                    )
+                    project_id = credentials.project_id
+                    credentials_to_use = credentials
+                    project_id_to_use = project_id
+                    credential_source = "GOOGLE_CREDENTIALS_JSON env var"
+                    print(f"INFO: [OpenAI Path] Using credentials from {credential_source} for project: {project_id_to_use}")
+                except Exception as e:
+                    print(f"WARNING: [OpenAI Path] Error processing GOOGLE_CREDENTIALS_JSON: {e}. Trying next method.")
+                    credentials_to_use = None # Ensure reset if failed
+
+            # Priority 2: Credential Manager (Rotated Files)
+            if credentials_to_use is None:
+                print(f"INFO: [OpenAI Path] Checking Credential Manager (directory: {credential_manager.credentials_dir})")
+                rotated_credentials, rotated_project_id = credential_manager.get_next_credentials()
+                if rotated_credentials and rotated_project_id:
+                    credentials_to_use = rotated_credentials
+                    project_id_to_use = rotated_project_id
+                    credential_source = f"Credential Manager file (Index: {credential_manager.current_index -1 if credential_manager.current_index > 0 else len(credential_manager.credentials_files) - 1})"
+                    print(f"INFO: [OpenAI Path] Using credentials from {credential_source} for project: {project_id_to_use}")
+                else:
+                    print(f"INFO: [OpenAI Path] No credentials loaded via Credential Manager.")
+
+            # Priority 3: GOOGLE_APPLICATION_CREDENTIALS (File Path in Env Var)
+            if credentials_to_use is None:
+                file_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+                if file_path:
+                    print(f"INFO: [OpenAI Path] Checking GOOGLE_APPLICATION_CREDENTIALS file path: {file_path}")
+                    if os.path.exists(file_path):
+                        try:
+                            credentials = service_account.Credentials.from_service_account_file(
+                                file_path, scopes=['https://www.googleapis.com/auth/cloud-platform']
+                            )
+                            project_id = credentials.project_id
+                            credentials_to_use = credentials
+                            project_id_to_use = project_id
+                            credential_source = "GOOGLE_APPLICATION_CREDENTIALS file path"
+                            print(f"INFO: [OpenAI Path] Using credentials from {credential_source} for project: {project_id_to_use}")
+                        except Exception as e:
+                            print(f"ERROR: [OpenAI Path] Failed to load credentials from GOOGLE_APPLICATION_CREDENTIALS path ({file_path}): {e}")
+                    else:
+                         print(f"ERROR: [OpenAI Path] GOOGLE_APPLICATION_CREDENTIALS file does not exist at path: {file_path}")
+
+            # Error if no credentials found after all checks
+            if credentials_to_use is None or project_id_to_use is None:
+                error_msg = "No valid credentials found for OpenAI client path. Tried GOOGLE_CREDENTIALS_JSON, Credential Manager, and GOOGLE_APPLICATION_CREDENTIALS."
+                print(f"ERROR: {error_msg}")
+                error_response = create_openai_error_response(500, error_msg, "server_error")
+                return JSONResponse(status_code=500, content=error_response)
+            # --- Credentials Determined ---
+
+            # Get/Refresh GCP Token from the chosen credentials (credentials_to_use)
+            gcp_token = None
+            if credentials_to_use.expired or not credentials_to_use.token:
+                print(f"INFO: [OpenAI Path] Refreshing GCP token (Source: {credential_source})...")
+                gcp_token = _refresh_auth(credentials_to_use)
+            else:
+                gcp_token = credentials_to_use.token
+
+            if not gcp_token:
+                error_msg = f"Failed to obtain valid GCP token for OpenAI client (Source: {credential_source})."
+                print(f"ERROR: {error_msg}")
+                error_response = create_openai_error_response(500, error_msg, "server_error")
+                return JSONResponse(status_code=500, content=error_response)
+
+            # Configuration using determined Project ID
+            PROJECT_ID = project_id_to_use
+            LOCATION = "us-central1" # Assuming same location as genai client
+            VERTEX_AI_OPENAI_ENDPOINT_URL = (
+                f"https://{LOCATION}-aiplatform.googleapis.com/v1beta1/"
+                f"projects/{PROJECT_ID}/locations/{LOCATION}/endpoints/openapi"
+            )
+            # UNDERLYING_MODEL_ID is now set above based on the request
+
+            # Initialize Async OpenAI Client
+            openai_client = openai.AsyncOpenAI(
+                base_url=VERTEX_AI_OPENAI_ENDPOINT_URL,
+                api_key=gcp_token,
+            )
+
+            # Define standard safety settings (as used elsewhere)
+            openai_safety_settings = [
+                {
+                    "category": "HARM_CATEGORY_HARASSMENT",
+                    "threshold": "OFF"
+                },
+                {
+                    "category": "HARM_CATEGORY_HATE_SPEECH",
+                    "threshold": "OFF"
+                },
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "OFF"
+                },
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "threshold": "OFF"
+                },
+                {
+                    "category": 'HARM_CATEGORY_CIVIC_INTEGRITY',
+                    "threshold": 'OFF'
+                }
+            ]
+
+            # Prepare parameters for OpenAI client call
+            openai_params = {
+                "model": UNDERLYING_MODEL_ID,
+                "messages": [msg.model_dump(exclude_unset=True) for msg in request.messages],
+                "temperature": request.temperature,
+                "max_tokens": request.max_tokens,
+                "top_p": request.top_p,
+                "stream": request.stream,
+                "stop": request.stop,
+                # "presence_penalty": request.presence_penalty,
+                # "frequency_penalty": request.frequency_penalty,
+                "seed": request.seed,
+                "n": request.n,
+                # Note: logprobs/response_logprobs mapping might need adjustment
+                # Note: top_k is not directly supported by standard OpenAI API spec
+            }
+            # Add safety settings via extra_body
+            openai_extra_body = {
+                'google': {
+                    'safety_settings': openai_safety_settings
+                }
+            }
+            openai_params = {k: v for k, v in openai_params.items() if v is not None}
+
+
+            # Make the call using OpenAI client
+            if request.stream:
+                async def openai_stream_generator():
+                    try:
+                        stream = await openai_client.chat.completions.create(
+                            **openai_params,
+                            extra_body=openai_extra_body # Pass safety settings here
+                        )
+                        async for chunk in stream:
+                             yield f"data: {chunk.model_dump_json()}\n\n"
+                        yield "data: [DONE]\n\n"
+                    except Exception as stream_error:
+                        error_msg = f"Error during OpenAI client streaming for {request.model}: {str(stream_error)}"
+                        print(error_msg)
+                        error_response_content = create_openai_error_response(500, error_msg, "server_error")
+                        yield f"data: {json.dumps(error_response_content)}\n\n"
+                        yield "data: [DONE]\n\n"
+
+                return StreamingResponse(openai_stream_generator(), media_type="text/event-stream")
+            else:
+                try:
+                    response = await openai_client.chat.completions.create(
+                        **openai_params,
+                        extra_body=openai_extra_body # Pass safety settings here
+                    )
+                    return JSONResponse(content=response.model_dump(exclude_unset=True))
+                except Exception as generate_error:
+                    error_msg = f"Error calling OpenAI client for {request.model}: {str(generate_error)}"
+                    print(error_msg)
+                    error_response = create_openai_error_response(500, error_msg, "server_error")
+                    return JSONResponse(status_code=500, content=error_response)
+
+        # --- End of specific OpenAI client model handling ---
+
+        # Initialize flags before checking suffixes
+        is_auto_model = False
+        is_grounded_search = False
+        is_encrypted_model = False
+        is_encrypted_full_model = False
+        is_nothinking_model = False
+        is_max_thinking_model = False
+        base_model_name = request.model # Default to the full name
+
+        # Check model type and extract base model name
+        if request.model.endswith("-auto"):
+             is_auto_model = True
+             base_model_name = request.model.replace("-auto", "")
+        elif request.model.endswith("-search"):
+             is_grounded_search = True
+             base_model_name = request.model.replace("-search", "")
+        elif request.model.endswith("-encrypt"):
+             is_encrypted_model = True
+             base_model_name = request.model.replace("-encrypt", "")
+        elif request.model.endswith("-encrypt-full"):
+             is_encrypted_full_model = True
+             base_model_name = request.model.replace("-encrypt-full", "")
+        elif request.model.endswith("-nothinking"):
+             is_nothinking_model = True
+             base_model_name = request.model.replace("-nothinking","")
             # Specific check for the flash model requiring budget
-            if base_model_name != "gemini-2.5-flash-preview-04-17":
-                error_response = create_openai_error_response(
-                    400, f"Model '{request.model}' does not support -nothinking variant", "invalid_request_error"
-                )
-                return JSONResponse(status_code=400, content=error_response)
-        elif is_max_thinking_model:
-            base_model_name = request.model.replace("-max","")
+             # Specific check for the flash model requiring budget
+             if base_model_name != "gemini-2.5-flash-preview-04-17":
+                 error_response = create_openai_error_response(
+                     400, f"Model '{request.model}' does not support -nothinking variant", "invalid_request_error"
+                 )
+                 return JSONResponse(status_code=400, content=error_response)
+        elif request.model.endswith("-max"):
+             is_max_thinking_model = True
+             base_model_name = request.model.replace("-max","")
             # Specific check for the flash model requiring budget
-            if base_model_name != "gemini-2.5-flash-preview-04-17":
-                error_response = create_openai_error_response(
-                    400, f"Model '{request.model}' does not support -max variant", "invalid_request_error"
-                )
-                return JSONResponse(status_code=400, content=error_response)
+             # Specific check for the flash model requiring budget
+             if base_model_name != "gemini-2.5-flash-preview-04-17":
+                 error_response = create_openai_error_response(
+                     400, f"Model '{request.model}' does not support -max variant", "invalid_request_error"
+                 )
+                 return JSONResponse(status_code=400, content=error_response)
         else:
             base_model_name = request.model
 
@@ -1418,7 +1632,8 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
             types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="OFF"),
             types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="OFF"),
             types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="OFF"),
-            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="OFF")
+            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="OFF"),
+            types.SafetySetting(category="HARM_CATEGORY_CIVIC_INTEGRITY", threshold="OFF")
         ]
         generation_config["safety_settings"] = safety_settings
 
@@ -1518,8 +1733,18 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
         # --- Main Logic ---
         last_error = None
 
-        if is_auto_model:
+        # --- Main Logic --- (Ensure flags are correctly set if the first 'if' wasn't met)
+        # Re-evaluate flags based on elif structure for clarity if needed, or rely on the fact that the first 'if' returned.
+        is_auto_model = request.model.endswith("-auto") # This will be False if the first 'if' was True
+        is_grounded_search = request.model.endswith("-search")
+        is_encrypted_model = request.model.endswith("-encrypt")
+        is_encrypted_full_model = request.model.endswith("-encrypt-full")
+        is_nothinking_model = request.model.endswith("-nothinking")
+        is_max_thinking_model = request.model.endswith("-max")
+
+        if is_auto_model: # This remains the primary check after the openai specific one
             print(f"Processing auto model: {request.model}")
+            base_model_name = request.model.replace("-auto", "") # Ensure base_model_name is set here too
             # Define encryption instructions for system_instruction
             encryption_instructions = [
                 "// AI Assistant Configuration //",
