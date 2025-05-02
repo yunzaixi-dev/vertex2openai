@@ -66,6 +66,53 @@ async def get_api_key(authorization: Optional[str] = Header(None)):
     
     return api_key
 
+# Helper function to parse multiple JSONs from a string
+def parse_multiple_json_credentials(json_str: str) -> List[Dict[str, Any]]:
+    """
+    Parse multiple JSON objects from a string separated by commas.
+    Format expected: {json_object1},{json_object2},...
+    Returns a list of parsed JSON objects.
+    """
+    credentials_list = []
+    nesting_level = 0
+    current_object_start = -1
+    str_length = len(json_str)
+
+    for i, char in enumerate(json_str):
+        if char == '{':
+            if nesting_level == 0:
+                current_object_start = i
+            nesting_level += 1
+        elif char == '}':
+            if nesting_level > 0:
+                nesting_level -= 1
+                if nesting_level == 0 and current_object_start != -1:
+                    # Found a complete top-level JSON object
+                    json_object_str = json_str[current_object_start : i + 1]
+                    try:
+                        credentials_info = json.loads(json_object_str)
+                        # Basic validation for service account structure
+                        required_fields = ["type", "project_id", "private_key_id", "private_key", "client_email"]
+                        if all(field in credentials_info for field in required_fields):
+                             credentials_list.append(credentials_info)
+                             print(f"DEBUG: Successfully parsed a JSON credential object.")
+                        else:
+                             print(f"WARNING: Parsed JSON object missing required fields: {json_object_str[:100]}...")
+                    except json.JSONDecodeError as e:
+                        print(f"ERROR: Failed to parse JSON object segment: {json_object_str[:100]}... Error: {e}")
+                    current_object_start = -1 # Reset for the next object
+            else:
+                # Found a closing brace without a matching open brace in scope, might indicate malformed input
+                 print(f"WARNING: Encountered unexpected '}}' at index {i}. Input might be malformed.")
+
+
+    if nesting_level != 0:
+        print(f"WARNING: JSON string parsing ended with non-zero nesting level ({nesting_level}). Check for unbalanced braces.")
+
+    print(f"DEBUG: Parsed {len(credentials_list)} credential objects from the input string.")
+    return credentials_list
+
+
 # Credential Manager for handling multiple service accounts
 class CredentialManager:
     def __init__(self, default_credentials_dir="/app/credentials"):
@@ -75,78 +122,223 @@ class CredentialManager:
         self.current_index = 0
         self.credentials = None
         self.project_id = None
-        self.load_credentials_list()
-    
+        # New: Store credentials loaded directly from JSON objects
+        self.in_memory_credentials: List[Dict[str, Any]] = []
+        self.load_credentials_list() # Load file-based credentials initially
+
+    def add_credential_from_json(self, credentials_info: Dict[str, Any]) -> bool:
+        """
+        Add a credential from a JSON object to the manager's in-memory list.
+
+        Args:
+            credentials_info: Dict containing service account credentials
+
+        Returns:
+            bool: True if credential was added successfully, False otherwise
+        """
+        try:
+            # Validate structure again before creating credentials object
+            required_fields = ["type", "project_id", "private_key_id", "private_key", "client_email"]
+            if not all(field in credentials_info for field in required_fields):
+                 print(f"WARNING: Skipping JSON credential due to missing required fields.")
+                 return False
+
+            credentials = service_account.Credentials.from_service_account_info(
+                credentials_info,
+                scopes=['https://www.googleapis.com/auth/cloud-platform']
+            )
+            project_id = credentials.project_id
+            print(f"DEBUG: Successfully created credentials object from JSON for project: {project_id}")
+
+            # Store the credentials object and project ID
+            self.in_memory_credentials.append({
+                'credentials': credentials,
+                'project_id': project_id,
+                 'source': 'json_string' # Add source for clarity
+            })
+            print(f"INFO: Added credential for project {project_id} from JSON string to Credential Manager.")
+            return True
+        except Exception as e:
+            print(f"ERROR: Failed to create credentials from parsed JSON object: {e}")
+            return False
+
+    def load_credentials_from_json_list(self, json_list: List[Dict[str, Any]]) -> int:
+        """
+        Load multiple credentials from a list of JSON objects into memory.
+
+        Args:
+            json_list: List of dicts containing service account credentials
+
+        Returns:
+            int: Number of credentials successfully loaded
+        """
+        # Avoid duplicates if called multiple times
+        existing_projects = {cred['project_id'] for cred in self.in_memory_credentials}
+        success_count = 0
+        newly_added_projects = set()
+
+        for credentials_info in json_list:
+             project_id = credentials_info.get('project_id')
+             # Check if this project_id from JSON exists in files OR already added from JSON
+             is_duplicate_file = any(os.path.basename(f) == f"{project_id}.json" for f in self.credentials_files) # Basic check
+             is_duplicate_mem = project_id in existing_projects or project_id in newly_added_projects
+
+             if project_id and not is_duplicate_file and not is_duplicate_mem:
+                 if self.add_credential_from_json(credentials_info):
+                     success_count += 1
+                     newly_added_projects.add(project_id)
+             elif project_id:
+                  print(f"DEBUG: Skipping duplicate credential for project {project_id} from JSON list.")
+
+
+        if success_count > 0:
+             print(f"INFO: Loaded {success_count} new credentials from JSON list into memory.")
+        return success_count
+
     def load_credentials_list(self):
         """Load the list of available credential files"""
         # Look for all .json files in the credentials directory
         pattern = os.path.join(self.credentials_dir, "*.json")
         self.credentials_files = glob.glob(pattern)
-        
+
         if not self.credentials_files:
             # print(f"No credential files found in {self.credentials_dir}")
-            return False
-        
-        print(f"Found {len(self.credentials_files)} credential files: {[os.path.basename(f) for f in self.credentials_files]}")
-        return True
-    
+            pass # Don't return False yet, might have in-memory creds
+        else:
+             print(f"Found {len(self.credentials_files)} credential files: {[os.path.basename(f) for f in self.credentials_files]}")
+
+        # Check total credentials
+        return self.get_total_credentials() > 0
+
     def refresh_credentials_list(self):
-        """Refresh the list of credential files (useful if files are added/removed)"""
-        old_count = len(self.credentials_files)
-        self.load_credentials_list()
-        new_count = len(self.credentials_files)
-        
-        if old_count != new_count:
-            print(f"Credential files updated: {old_count} -> {new_count}")
-        
-        return len(self.credentials_files) > 0
-    
+        """Refresh the list of credential files and return if any credentials exist"""
+        old_file_count = len(self.credentials_files)
+        self.load_credentials_list() # Reloads file list
+        new_file_count = len(self.credentials_files)
+
+        if old_file_count != new_file_count:
+            print(f"Credential files updated: {old_file_count} -> {new_file_count}")
+
+        # Total credentials = files + in-memory
+        total_credentials = self.get_total_credentials()
+        print(f"DEBUG: Refresh check - Total credentials available: {total_credentials}")
+        return total_credentials > 0
+
+    def get_total_credentials(self):
+        """Returns the total number of credentials (file + in-memory)."""
+        return len(self.credentials_files) + len(self.in_memory_credentials)
+
     def get_next_credentials(self):
-        """Rotate to the next credential file and load it"""
-        if not self.credentials_files:
+        """
+        Rotate to the next credential (file or in-memory) and return it.
+        """
+        total_credentials = self.get_total_credentials()
+
+        if total_credentials == 0:
+            print("WARNING: No credentials available in Credential Manager (files or in-memory).")
             return None, None
-        
-        # Get the next credential file in rotation
-        file_path = self.credentials_files[self.current_index]
-        self.current_index = (self.current_index + 1) % len(self.credentials_files)
-        
-        try:
-            credentials = service_account.Credentials.from_service_account_file(file_path,scopes=['https://www.googleapis.com/auth/cloud-platform'])
-            project_id = credentials.project_id
-            print(f"Loaded credentials from {file_path} for project: {project_id}")
-            self.credentials = credentials
-            self.project_id = project_id
-            return credentials, project_id
-        except Exception as e:
-            print(f"Error loading credentials from {file_path}: {e}")
-            # Try the next file if this one fails
-            if len(self.credentials_files) > 1:
-                print("Trying next credential file...")
-                return self.get_next_credentials()
-            return None, None
-    
+
+        # Determine which credential (file or in-memory) to use based on the current index
+        # Use a temporary index for calculation to avoid modifying self.current_index prematurely
+        effective_index_to_use = self.current_index % total_credentials
+        num_files = len(self.credentials_files)
+
+        # Advance the main index *after* deciding which one to use for this call
+        self.current_index = (self.current_index + 1) % total_credentials
+
+        if effective_index_to_use < num_files:
+            # It's a file-based credential
+            file_path = self.credentials_files[effective_index_to_use]
+            print(f"DEBUG: Attempting to load credential from file: {os.path.basename(file_path)} (Index {effective_index_to_use})")
+            try:
+                credentials = service_account.Credentials.from_service_account_file(
+                    file_path,
+                    scopes=['https://www.googleapis.com/auth/cloud-platform']
+                )
+                project_id = credentials.project_id
+                print(f"INFO: Rotated to credential file: {os.path.basename(file_path)} for project: {project_id}")
+                self.credentials = credentials # Cache last used
+                self.project_id = project_id   # Cache last used
+                return credentials, project_id
+            except Exception as e:
+                print(f"ERROR: Failed loading credentials from file {os.path.basename(file_path)}: {e}. Skipping.")
+                # Try the next available credential recursively IF there are others available
+                if total_credentials > 1:
+                     print("DEBUG: Attempting to get next credential after file load error...")
+                     # The index is already advanced, so calling again should try the next one
+                     # Need to ensure we don't get stuck in infinite loop if all fail
+                     # Let's limit recursion depth or track failed indices (simpler: rely on index advance)
+                     # The index was already advanced, so calling again will try the next one
+                     return self.get_next_credentials()
+                else:
+                     print("ERROR: Only one credential (file) available and it failed to load.")
+                     return None, None # No more credentials to try
+        else:
+            # It's an in-memory credential
+            in_memory_index = effective_index_to_use - num_files
+            if in_memory_index < len(self.in_memory_credentials):
+                cred_info = self.in_memory_credentials[in_memory_index]
+                credentials = cred_info['credentials']
+                project_id = cred_info['project_id']
+                print(f"INFO: Rotated to in-memory credential for project: {project_id} (Index {in_memory_index})")
+                # TODO: Add handling for expired in-memory credentials if needed (refresh?)
+                # For now, assume they are valid when loaded
+                self.credentials = credentials # Cache last used
+                self.project_id = project_id   # Cache last used
+                return credentials, project_id
+            else:
+                 # This case should not happen with correct modulo arithmetic, but added defensively
+                 print(f"ERROR: Calculated in-memory index {in_memory_index} is out of bounds.")
+                 return None, None
+
+
     def get_random_credentials(self):
-        """Get a random credential file and load it"""
-        if not self.credentials_files:
+        """Get a random credential (file or in-memory) and load it"""
+        total_credentials = self.get_total_credentials()
+        if total_credentials == 0:
+            print("WARNING: No credentials available for random selection.")
             return None, None
-        
-        # Choose a random credential file
-        file_path = random.choice(self.credentials_files)
-        
-        try:
-            credentials = service_account.Credentials.from_service_account_file(file_path,scopes=['https://www.googleapis.com/auth/cloud-platform'])
-            project_id = credentials.project_id
-            print(f"Loaded credentials from {file_path} for project: {project_id}")
-            self.credentials = credentials
-            self.project_id = project_id
-            return credentials, project_id
-        except Exception as e:
-            print(f"Error loading credentials from {file_path}: {e}")
-            # Try another random file if this one fails
-            if len(self.credentials_files) > 1:
-                print("Trying another credential file...")
-                return self.get_random_credentials()
-            return None, None
+
+        random_index = random.randrange(total_credentials)
+        num_files = len(self.credentials_files)
+
+        if random_index < num_files:
+            # Selected a file-based credential
+            file_path = self.credentials_files[random_index]
+            print(f"DEBUG: Randomly selected file: {os.path.basename(file_path)}")
+            try:
+                credentials = service_account.Credentials.from_service_account_file(
+                    file_path,
+                    scopes=['https://www.googleapis.com/auth/cloud-platform']
+                )
+                project_id = credentials.project_id
+                print(f"INFO: Loaded random credential from file {os.path.basename(file_path)} for project: {project_id}")
+                self.credentials = credentials # Cache last used
+                self.project_id = project_id   # Cache last used
+                return credentials, project_id
+            except Exception as e:
+                print(f"ERROR: Failed loading random credentials file {os.path.basename(file_path)}: {e}. Trying again.")
+                # Try another random credential if this one fails and others exist
+                if total_credentials > 1:
+                    return self.get_random_credentials() # Recursive call
+                else:
+                    print("ERROR: Only one credential (file) available and it failed to load.")
+                    return None, None
+        else:
+            # Selected an in-memory credential
+            in_memory_index = random_index - num_files
+            if in_memory_index < len(self.in_memory_credentials):
+                cred_info = self.in_memory_credentials[in_memory_index]
+                credentials = cred_info['credentials']
+                project_id = cred_info['project_id']
+                print(f"INFO: Loaded random in-memory credential for project: {project_id}")
+                self.credentials = credentials # Cache last used
+                self.project_id = project_id   # Cache last used
+                return credentials, project_id
+            else:
+                 # Defensive case
+                 print(f"ERROR: Calculated random in-memory index {in_memory_index} is out of bounds.")
+                 return None, None
 
 # Initialize the credential manager
 credential_manager = CredentialManager()
@@ -190,59 +382,130 @@ class OpenAIRequest(BaseModel):
 def init_vertex_ai():
     global client # This will hold the fallback client if initialized
     try:
-        # Priority 1: Check for credentials JSON content in environment variable (Hugging Face)
+        # Priority 1: Check for credentials JSON content in environment variable
         credentials_json_str = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+        json_loaded_successfully = False # Flag to track if we succeed via JSON string(s)
+
         if credentials_json_str:
+            print("INFO: Found GOOGLE_CREDENTIALS_JSON environment variable. Attempting to load.")
             try:
-                # Try to parse the JSON
-                try:
-                    credentials_info = json.loads(credentials_json_str)
-                    # Check if the parsed JSON has the expected structure
-                    if not isinstance(credentials_info, dict):
-                        # print(f"ERROR: Parsed JSON is not a dictionary, type: {type(credentials_info)}") # Removed
-                        raise ValueError("Credentials JSON must be a dictionary")
-                    # Check for required fields in the service account JSON
-                    required_fields = ["type", "project_id", "private_key_id", "private_key", "client_email"]
-                    missing_fields = [field for field in required_fields if field not in credentials_info]
-                    if missing_fields:
-                        # print(f"ERROR: Missing required fields in credentials JSON: {missing_fields}") # Removed
-                        raise ValueError(f"Credentials JSON missing required fields: {missing_fields}")
-                except json.JSONDecodeError as json_err:
-                    print(f"ERROR: Failed to parse GOOGLE_CREDENTIALS_JSON as JSON: {json_err}")
-                    raise
+                # --- Attempt 1: Parse as multiple JSON objects ---
+                json_objects = parse_multiple_json_credentials(credentials_json_str)
 
-                # Create credentials from the parsed JSON info (json.loads should handle \n)
-                try:
+                if json_objects:
+                    print(f"DEBUG: Parsed {len(json_objects)} potential credential objects from GOOGLE_CREDENTIALS_JSON.")
+                    # Add all valid credentials to the credential manager's in-memory list
+                    success_count = credential_manager.load_credentials_from_json_list(json_objects)
 
-                    credentials = service_account.Credentials.from_service_account_info(
-                        credentials_info, # Pass the dictionary directly
-                        scopes=['https://www.googleapis.com/auth/cloud-platform']
-                    )
-                    project_id = credentials.project_id
-                    print(f"Successfully created credentials object for project: {project_id}")
-                except Exception as cred_err:
-                    print(f"ERROR: Failed to create credentials from service account info: {cred_err}")
-                    raise
-                
-                # Initialize the client with the credentials
-                try:
-                    # Initialize the global client ONLY if it hasn't been set yet
-                    if client is None:
-                        client = genai.Client(vertexai=True, credentials=credentials, project=project_id, location="us-central1")
-                        print(f"INFO: Initialized fallback Vertex AI client using GOOGLE_CREDENTIALS_JSON env var for project: {project_id}")
-                    else:
-                         print(f"INFO: Fallback client already initialized. GOOGLE_CREDENTIALS_JSON credentials validated for project: {project_id}")
-                    # Even if client was already set, we return True because this method worked
-                    return True
-                except Exception as client_err:
-                    print(f"ERROR: Failed to initialize genai.Client from GOOGLE_CREDENTIALS_JSON: {client_err}")
-                    raise
+                    if success_count > 0:
+                        print(f"INFO: Successfully loaded {success_count} credentials from GOOGLE_CREDENTIALS_JSON into manager.")
+                        # Initialize the fallback client with the first *successfully loaded* in-memory credential if needed
+                        if client is None and credential_manager.in_memory_credentials:
+                             try:
+                                 first_cred_info = credential_manager.in_memory_credentials[0]
+                                 first_credentials = first_cred_info['credentials']
+                                 first_project_id = first_cred_info['project_id']
+                                 client = genai.Client(
+                                     vertexai=True,
+                                     credentials=first_credentials,
+                                     project=first_project_id,
+                                     location="us-central1"
+                                 )
+                                 print(f"INFO: Initialized fallback Vertex AI client using first credential from GOOGLE_CREDENTIALS_JSON (Project: {first_project_id})")
+                                 json_loaded_successfully = True
+                             except Exception as client_init_err:
+                                  print(f"ERROR: Failed to initialize genai.Client from first GOOGLE_CREDENTIALS_JSON object: {client_init_err}")
+                                  # Don't return yet, let it fall through to other methods if client init failed
+                        elif client is not None:
+                             print("INFO: Fallback client already initialized. GOOGLE_CREDENTIALS_JSON validated.")
+                             json_loaded_successfully = True
+                        # If client is None but loading failed to add any to manager, json_loaded_successfully remains False
+
+                        # If we successfully loaded JSON creds AND initialized/validated the client, we are done with Priority 1
+                        if json_loaded_successfully:
+                             return True # Exit early, Priority 1 succeeded
+
+                # --- Attempt 2: If multiple parsing didn't yield results, try parsing as a single JSON object ---
+                if not json_loaded_successfully: # Or if json_objects was empty
+                    print("DEBUG: Multi-JSON parsing did not yield usable credentials or failed client init. Attempting single JSON parse...")
+                    try:
+                        credentials_info = json.loads(credentials_json_str)
+                        # Check structure (redundant with add_credential_from_json, but good defense)
+                        if not isinstance(credentials_info, dict):
+                            raise ValueError("Credentials JSON must be a dictionary")
+                        required_fields = ["type", "project_id", "private_key_id", "private_key", "client_email"]
+                        if not all(field in credentials_info for field in required_fields):
+                            raise ValueError(f"Credentials JSON missing required fields")
+
+                        # Add this single credential to the manager
+                        if credential_manager.add_credential_from_json(credentials_info):
+                             print("INFO: Successfully loaded single credential from GOOGLE_CREDENTIALS_JSON into manager.")
+                             # Initialize client if needed, using the newly added credential
+                             if client is None and credential_manager.in_memory_credentials: # Should have 1 now
+                                 try:
+                                     # Get the last added credential (which is the first/only one here)
+                                     last_cred_info = credential_manager.in_memory_credentials[-1]
+                                     single_credentials = last_cred_info['credentials']
+                                     single_project_id = last_cred_info['project_id']
+                                     client = genai.Client(
+                                         vertexai=True,
+                                         credentials=single_credentials,
+                                         project=single_project_id,
+                                         location="us-central1"
+                                     )
+                                     print(f"INFO: Initialized fallback Vertex AI client using single credential from GOOGLE_CREDENTIALS_JSON (Project: {single_project_id})")
+                                     json_loaded_successfully = True
+                                 except Exception as client_init_err:
+                                     print(f"ERROR: Failed to initialize genai.Client from single GOOGLE_CREDENTIALS_JSON object: {client_init_err}")
+                             elif client is not None:
+                                  print("INFO: Fallback client already initialized. Single GOOGLE_CREDENTIALS_JSON validated.")
+                                  json_loaded_successfully = True
+
+                             # If successful, exit
+                             if json_loaded_successfully:
+                                  return True # Exit early, Priority 1 succeeded (as single JSON)
+
+                    except Exception as single_json_err:
+                        print(f"WARNING: GOOGLE_CREDENTIALS_JSON could not be parsed as single valid JSON: {single_json_err}. Proceeding to other methods.")
+
             except Exception as e:
-                print(f"WARNING: Error processing GOOGLE_CREDENTIALS_JSON: {e}. Will try other methods.")
-                # Fall through to other methods if this fails
-        
-        # Priority 2: Try to use the credential manager to get credentials from files
-        # print(f"Trying credential manager (directory: {credential_manager.credentials_dir})") # Reduced verbosity
+                # Catch errors during multi-JSON parsing or loading
+                print(f"WARNING: Error processing GOOGLE_CREDENTIALS_JSON (multi-parse/load attempt): {e}. Will try other methods.")
+                # Ensure flag is False and fall through
+
+        # If GOOGLE_CREDENTIALS_JSON didn't exist or failed to yield a usable client...
+        if not json_loaded_successfully:
+             print(f"INFO: GOOGLE_CREDENTIALS_JSON did not provide usable credentials. Checking filesystem via Credential Manager (directory: {credential_manager.credentials_dir}).")
+
+        # Priority 2: Try Credential Manager (files from directory)
+        # Refresh file list AND check if *any* credentials (file or pre-loaded JSON) exist
+        if credential_manager.refresh_credentials_list(): # Checks total count now
+            # Attempt to get the *next* available credential (could be file or JSON loaded earlier)
+            # We call get_next_credentials here mainly to validate it works and log the first valid one found
+            # The actual rotation happens per-request
+            cm_credentials, cm_project_id = credential_manager.get_next_credentials()
+
+            if cm_credentials and cm_project_id:
+                try:
+                    # Initialize global client ONLY if it hasn't been set by Priority 1
+                    if client is None:
+                        client = genai.Client(vertexai=True, credentials=cm_credentials, project=cm_project_id, location="us-central1")
+                        print(f"INFO: Initialized fallback Vertex AI client using Credential Manager (Source: {'File' if credential_manager.current_index <= len(credential_manager.credentials_files) else 'JSON'}) for project: {cm_project_id}")
+                        return True # Successfully initialized global client via Cred Manager
+                    else:
+                        # Client was already initialized (likely by JSON string), but we validated CM works too.
+                        print(f"INFO: Fallback client already initialized. Credential Manager source validated for project: {cm_project_id}")
+                        # Don't return True here if client was already set, let it fall through to check GAC if needed (though unlikely needed now)
+                except Exception as e:
+                    print(f"ERROR: Failed to initialize client with credentials from Credential Manager source: {e}")
+            else:
+                 # This might happen if get_next_credentials itself failed internally
+                 print(f"INFO: Credential Manager get_next_credentials() returned None.")
+        else:
+             print("INFO: No credentials found via Credential Manager (files or JSON string).")
+
+        # Priority 3: Fall back to GOOGLE_APPLICATION_CREDENTIALS environment variable (file path)
+        # This should only run if client is STILL None after JSON and CM attempts
         # Priority 2: Try to use the credential manager to get credentials from files
         # We call get_next_credentials here mainly to validate it works and log the first file found
         # The actual rotation happens per-request
@@ -1374,46 +1637,27 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
             base_model_name = request.model.replace("-openai", "") # Extract base model name
             UNDERLYING_MODEL_ID = f"google/{base_model_name}" # Add google/ prefix
 
-            # --- Determine Credentials for OpenAI Client (Correct Priority) ---
+            # --- Determine Credentials for OpenAI Client using Credential Manager ---
+            # The init_vertex_ai function already loaded JSON credentials into the manager if available.
+            # Now, we just need to get the next available credential using the manager's rotation.
             credentials_to_use = None
             project_id_to_use = None
             credential_source = "unknown"
 
-            # Priority 1: GOOGLE_CREDENTIALS_JSON (JSON String in Env Var)
-            credentials_json_str = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-            if credentials_json_str:
-                try:
-                    credentials_info = json.loads(credentials_json_str)
-                    if not isinstance(credentials_info, dict): raise ValueError("JSON is not a dict")
-                    required = ["type", "project_id", "private_key_id", "private_key", "client_email"]
-                    if any(f not in credentials_info for f in required): raise ValueError("Missing required fields")
+            print(f"INFO: [OpenAI Path] Attempting to get next credential from Credential Manager...")
+            # This will rotate through file-based and JSON-based credentials loaded during startup
+            rotated_credentials, rotated_project_id = credential_manager.get_next_credentials()
 
-                    credentials = service_account.Credentials.from_service_account_info(
-                        credentials_info, scopes=['https://www.googleapis.com/auth/cloud-platform']
-                    )
-                    project_id = credentials.project_id
-                    credentials_to_use = credentials
-                    project_id_to_use = project_id
-                    credential_source = "GOOGLE_CREDENTIALS_JSON env var"
-                    print(f"INFO: [OpenAI Path] Using credentials from {credential_source} for project: {project_id_to_use}")
-                except Exception as e:
-                    print(f"WARNING: [OpenAI Path] Error processing GOOGLE_CREDENTIALS_JSON: {e}. Trying next method.")
-                    credentials_to_use = None # Ensure reset if failed
-
-            # Priority 2: Credential Manager (Rotated Files)
-            if credentials_to_use is None:
-                print(f"INFO: [OpenAI Path] Checking Credential Manager (directory: {credential_manager.credentials_dir})")
-                rotated_credentials, rotated_project_id = credential_manager.get_next_credentials()
-                if rotated_credentials and rotated_project_id:
-                    credentials_to_use = rotated_credentials
-                    project_id_to_use = rotated_project_id
-                    credential_source = f"Credential Manager file (Index: {credential_manager.current_index -1 if credential_manager.current_index > 0 else len(credential_manager.credentials_files) - 1})"
-                    print(f"INFO: [OpenAI Path] Using credentials from {credential_source} for project: {project_id_to_use}")
-                else:
-                    print(f"INFO: [OpenAI Path] No credentials loaded via Credential Manager.")
-
-            # Priority 3: GOOGLE_APPLICATION_CREDENTIALS (File Path in Env Var)
-            if credentials_to_use is None:
+            if rotated_credentials and rotated_project_id:
+                credentials_to_use = rotated_credentials
+                project_id_to_use = rotated_project_id
+                # Determine if it came from file or JSON (crude check based on structure)
+                source_type = "In-Memory JSON" if hasattr(rotated_credentials, '_service_account_email') else "File" # Heuristic
+                credential_source = f"Credential Manager ({source_type})"
+                print(f"INFO: [OpenAI Path] Using credentials from {credential_source} for project: {project_id_to_use}")
+            else:
+                print(f"INFO: [OpenAI Path] Credential Manager did not provide credentials. Checking GOOGLE_APPLICATION_CREDENTIALS fallback.")
+                # Priority 3 (Fallback): GOOGLE_APPLICATION_CREDENTIALS (File Path in Env Var)
                 file_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
                 if file_path:
                     print(f"INFO: [OpenAI Path] Checking GOOGLE_APPLICATION_CREDENTIALS file path: {file_path}")
@@ -1432,9 +1676,10 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                     else:
                          print(f"ERROR: [OpenAI Path] GOOGLE_APPLICATION_CREDENTIALS file does not exist at path: {file_path}")
 
+
             # Error if no credentials found after all checks
             if credentials_to_use is None or project_id_to_use is None:
-                error_msg = "No valid credentials found for OpenAI client path. Tried GOOGLE_CREDENTIALS_JSON, Credential Manager, and GOOGLE_APPLICATION_CREDENTIALS."
+                error_msg = "No valid credentials found for OpenAI client path. Checked Credential Manager (JSON/Files) and GOOGLE_APPLICATION_CREDENTIALS."
                 print(f"ERROR: {error_msg}")
                 error_response = create_openai_error_response(500, error_msg, "server_error")
                 return JSONResponse(status_code=500, content=error_response)
