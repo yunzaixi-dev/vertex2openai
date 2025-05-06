@@ -1370,15 +1370,6 @@ async def list_models(api_key: str = Depends(get_api_key)):
     # Based on current information for Vertex AI models
     models = [
         {
-            "id": "gemini-2.5-pro-preview-05-06",
-            "object": "model",
-            "created": int(time.time()),
-            "owned_by": "google",
-            "permission": [],
-            "root": "gemini-2.5-pro-pre-05-06",
-            "parent": None,
-        },
-        {
             "id": "gemini-2.5-pro-exp-03-25",
             "object": "model",
             "created": int(time.time()),
@@ -1433,39 +1424,39 @@ async def list_models(api_key: str = Depends(get_api_key)):
             "parent": None,
         },
         {
-            "id": "gemini-2.5-pro-preview-03-25",
+            "id": "gemini-2.5-pro-preview-05-06",
             "object": "model",
             "created": int(time.time()),
             "owned_by": "google",
             "permission": [],
-            "root": "gemini-2.5-pro-preview-03-25",
+            "root": "gemini-2.5-pro-preview-05-06",
             "parent": None,
         },
         {
-            "id": "gemini-2.5-pro-preview-03-25-search",
+            "id": "gemini-2.5-pro-preview-05-06-search",
             "object": "model",
             "created": int(time.time()),
             "owned_by": "google",
             "permission": [],
-            "root": "gemini-2.5-pro-preview-03-25",
+            "root": "gemini-2.5-pro-preview-05-06",
             "parent": None,
         },
         {
-            "id": "gemini-2.5-pro-preview-03-25-encrypt",
+            "id": "gemini-2.5-pro-preview-05-06-encrypt",
             "object": "model",
             "created": int(time.time()),
             "owned_by": "google",
             "permission": [],
-            "root": "gemini-2.5-pro-preview-03-25",
+            "root": "gemini-2.5-pro-preview-05-06",
             "parent": None,
         },
         {
-            "id": "gemini-2.5-pro-preview-03-25-auto", # New auto model
+            "id": "gemini-2.5-pro-preview-05-06-auto", # New auto model
             "object": "model",
             "created": int(time.time()),
             "owned_by": "google",
             "permission": [],
-            "root": "gemini-2.5-pro-preview-03-25",
+            "root": "gemini-2.5-pro-preview-05-06",
             "parent": None,
         },
         {
