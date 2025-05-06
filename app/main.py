@@ -1370,6 +1370,15 @@ async def list_models(api_key: str = Depends(get_api_key)):
     # Based on current information for Vertex AI models
     models = [
         {
+            "id": "gemini-2.5-pro-preview-05-06",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-pre-05-06",
+            "parent": None,
+        },
+        {
             "id": "gemini-2.5-pro-exp-03-25",
             "object": "model",
             "created": int(time.time()),
@@ -1772,7 +1781,8 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                             extra_body=openai_extra_body # Pass safety settings here
                         )
                         async for chunk in stream:
-                             yield f"data: {chunk.model_dump_json()}\n\n"
+                            print(chunk.model_dump_json())
+                            yield f"data: {chunk.model_dump_json()}\n\n"
                         yield "data: [DONE]\n\n"
                     except Exception as stream_error:
                         error_msg = f"Error during OpenAI client streaming for {request.model}: {str(stream_error)}"
