@@ -22,6 +22,13 @@ from google.genai import types
 
 from google import genai
 import math
+VERTEX_EXPRESS_API_KEY_ENV_VAR = "VERTEX_EXPRESS_API_KEY"
+VERTEX_EXPRESS_MODELS = [
+    "gemini-2.0-flash-001",
+    "gemini-2.0-flash-lite-001",
+    "gemini-2.5-pro-preview-03-25",
+    "gemini-2.5-flash-preview-04-17",
+]
 
 client = None
 
@@ -1424,6 +1431,51 @@ async def list_models(api_key: str = Depends(get_api_key)):
             "parent": None,
         },
         {
+            "id": "gemini-2.5-pro-preview-03-25",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-preview-05-06",
+            "parent": None,
+        },
+        {
+            "id": "gemini-2.5-pro-preview-03-25-search",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-preview-03-25",
+            "parent": None,
+        },
+        {
+            "id": "gemini-2.5-pro-preview-03-25-encrypt",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-preview-03-25",
+            "parent": None,
+        },
+        {
+            "id": "gemini-2.5-pro-preview-03-25-encrypt-full",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-preview-03-25",
+            "parent": None,
+        },
+        {
+            "id": "gemini-2.5-pro-preview-03-25-auto", # New auto model
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-preview-03-25",
+            "parent": None,
+        },
+        {
             "id": "gemini-2.5-pro-preview-05-06",
             "object": "model",
             "created": int(time.time()),
@@ -1443,6 +1495,15 @@ async def list_models(api_key: str = Depends(get_api_key)):
         },
         {
             "id": "gemini-2.5-pro-preview-05-06-encrypt",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "google",
+            "permission": [],
+            "root": "gemini-2.5-pro-preview-05-06",
+            "parent": None,
+        },
+        {
+            "id": "gemini-2.5-pro-preview-05-06-encrypt-full",
             "object": "model",
             "created": int(time.time()),
             "owned_by": "google",
@@ -1824,7 +1885,6 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
              is_nothinking_model = True
              base_model_name = request.model.replace("-nothinking","")
             # Specific check for the flash model requiring budget
-             # Specific check for the flash model requiring budget
              if base_model_name != "gemini-2.5-flash-preview-04-17":
                  error_response = create_openai_error_response(
                      400, f"Model '{request.model}' does not support -nothinking variant", "invalid_request_error"
@@ -1834,41 +1894,51 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
              is_max_thinking_model = True
              base_model_name = request.model.replace("-max","")
             # Specific check for the flash model requiring budget
-             # Specific check for the flash model requiring budget
              if base_model_name != "gemini-2.5-flash-preview-04-17":
                  error_response = create_openai_error_response(
                      400, f"Model '{request.model}' does not support -max variant", "invalid_request_error"
                  )
                  return JSONResponse(status_code=400, content=error_response)
         else:
-            base_model_name = request.model
+            base_model_name = request.model # This ensures base_model_name is set if no suffix matches
 
         # Create generation config
         generation_config = create_generation_config(request)
 
-        # --- Determine which client to use (Rotation or Fallback) ---
+        # --- Determine which client to use (Express, Rotation, or Fallback) ---
         client_to_use = None
-        rotated_credentials, rotated_project_id = credential_manager.get_next_credentials()
+        express_api_key = os.environ.get(VERTEX_EXPRESS_API_KEY_ENV_VAR)
 
-        if rotated_credentials and rotated_project_id:
+        if express_api_key and base_model_name in VERTEX_EXPRESS_MODELS:
+            print(f"INFO: Attempting to use Vertex Express Mode for model {base_model_name} with API Key.")
             try:
-                # Create a request-specific client using the rotated credentials
-                client_to_use = genai.Client(vertexai=True, credentials=rotated_credentials, project=rotated_project_id, location="us-central1")
-                print(f"INFO: Using rotated credential for project: {rotated_project_id} (Index: {credential_manager.current_index -1 if credential_manager.current_index > 0 else len(credential_manager.credentials_files) - 1})") # Log which credential was used
+                client_to_use = genai.Client(vertexai=True, api_key=express_api_key)
+                print(f"INFO: Successfully initialized Vertex AI client in Express Mode for model {base_model_name}.")
             except Exception as e:
-                print(f"ERROR: Failed to create client from rotated credential: {e}. Will attempt fallback.")
-                client_to_use = None # Ensure it's None if creation failed
+                print(f"ERROR: Failed to initialize Vertex AI client in Express Mode: {e}. Falling back to other methods.")
+                client_to_use = None # Ensure client_to_use is None if express mode fails
 
-        # If rotation failed or wasn't possible, try the fallback client
+        if client_to_use is None: # If Express Mode was not used or failed
+            rotated_credentials, rotated_project_id = credential_manager.get_next_credentials()
+            if rotated_credentials and rotated_project_id:
+                try:
+                    # Create a request-specific client using the rotated credentials
+                    client_to_use = genai.Client(vertexai=True, credentials=rotated_credentials, project=rotated_project_id, location="us-central1")
+                    print(f"INFO: Using rotated credential for project: {rotated_project_id} (Index: {credential_manager.current_index -1 if credential_manager.current_index > 0 else credential_manager.get_total_credentials() - 1})") # Log which credential was used
+                except Exception as e:
+                    print(f"ERROR: Failed to create client from rotated credential: {e}. Will attempt fallback.")
+                    client_to_use = None # Ensure it's None if creation failed
+
+        # If express and rotation failed or weren't possible, try the fallback client
         if client_to_use is None:
             global client # Access the fallback client initialized at startup
             if client is not None:
                 client_to_use = client
                 print("INFO: Using fallback Vertex AI client.")
             else:
-                # Critical error: No rotated client AND no fallback client
+                # Critical error: No express, rotated, AND no fallback client
                 error_response = create_openai_error_response(
-                    500, "Vertex AI client not available (Rotation failed and no fallback)", "server_error"
+                    500, "Vertex AI client not available (Express, Rotation failed and no fallback)", "server_error"
                 )
                 return JSONResponse(status_code=500, content=error_response)
         # --- Client determined ---
