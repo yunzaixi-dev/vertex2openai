@@ -22,7 +22,7 @@ from google.genai import types
 
 from google import genai
 import math
-VERTEX_EXPRESS_API_KEY_ENV_VAR = "VERTEX_EXPRESS_API_KEY"
+VERTEX_EXPRESS_API_KEY = "VERTEX_EXPRESS_API_KEY"
 VERTEX_EXPRESS_MODELS = [
     "gemini-2.0-flash-001",
     "gemini-2.0-flash-lite-001",
@@ -1908,7 +1908,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
 
         # --- Determine which client to use (Express, Rotation, or Fallback) ---
         client_to_use = None
-        express_api_key = os.environ.get(VERTEX_EXPRESS_API_KEY_ENV_VAR)
+        express_api_key = os.environ.get(VERTEX_EXPRESS_API_KEY)
 
         if express_api_key and base_model_name in VERTEX_EXPRESS_MODELS:
             print(f"INFO: Attempting to use Vertex Express Mode for model {base_model_name} with API Key.")
