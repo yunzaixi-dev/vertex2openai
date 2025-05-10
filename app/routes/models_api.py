@@ -2,7 +2,7 @@ import time
 from fastapi import APIRouter, Depends
 # from typing import List, Dict, Any # Removed as unused
 
-from ..auth import get_api_key
+from auth import get_api_key # Changed from relative
 
 router = APIRouter()
 

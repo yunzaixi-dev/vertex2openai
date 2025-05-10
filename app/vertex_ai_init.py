@@ -1,7 +1,7 @@
 import json
 from google import genai
-from .credentials_manager import CredentialManager, parse_multiple_json_credentials
-from .. import config as app_config
+from credentials_manager import CredentialManager, parse_multiple_json_credentials # Changed from relative
+import config as app_config # Changed from relative
 
 # VERTEX_EXPRESS_API_KEY constant is removed, direct string "VERTEX_EXPRESS_API_KEY" will be used in chat_api.py
 VERTEX_EXPRESS_MODELS = [

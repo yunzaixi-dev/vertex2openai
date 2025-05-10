@@ -10,9 +10,9 @@ from google.genai import types
 from google import genai # Needed if _execute_gemini_call uses genai.Client directly
 
 # Local module imports
-from .models import OpenAIRequest, OpenAIMessage
-from .message_processing import deobfuscate_text, convert_to_openai_format, convert_chunk_to_openai, create_final_chunk
-from .. import config as app_config # Added import for app_config
+from models import OpenAIRequest, OpenAIMessage # Changed from relative
+from message_processing import deobfuscate_text, convert_to_openai_format, convert_chunk_to_openai, create_final_chunk # Changed from relative
+import config as app_config # Changed from relative
 
 def create_openai_error_response(status_code: int, message: str, error_type: str) -> Dict[str, Any]:
     return {

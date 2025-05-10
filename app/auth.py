@@ -1,7 +1,7 @@
 from fastapi import HTTPException, Header, Depends
 from fastapi.security import APIKeyHeader
 from typing import Optional
-from . import config
+import config # Changed from relative to absolute from app/
 
 # API Key security scheme
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)

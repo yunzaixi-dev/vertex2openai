@@ -6,13 +6,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 
 # Local module imports
-from .auth import get_api_key # Potentially for root endpoint
-from .credentials_manager import CredentialManager
-from .vertex_ai_init import init_vertex_ai
+from auth import get_api_key # Potentially for root endpoint
+from credentials_manager import CredentialManager
+from vertex_ai_init import init_vertex_ai
 
 # Routers
-from .routes import models_api
-from .routes import chat_api
+from routes import models_api
+from routes import chat_api
 
 # import config as app_config # Not directly used in main.py
 

@@ -4,7 +4,7 @@ import random
 import json
 from typing import List, Dict, Any
 from google.oauth2 import service_account
-from .. import config as app_config
+import config as app_config # Changed from relative
 
 # Helper function to parse multiple JSONs from a string
 def parse_multiple_json_credentials(json_str: str) -> List[Dict[str, Any]]:

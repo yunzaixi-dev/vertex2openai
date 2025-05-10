@@ -8,18 +8,18 @@ from typing import List, Dict, Any
 from google.genai import types
 from google import genai
 
-# Local module imports from parent 'app' directory
-from ..models import OpenAIRequest, OpenAIMessage
-from ..auth import get_api_key
-from ..main import credential_manager
-from .. import config as app_config
-from ..vertex_ai_init import VERTEX_EXPRESS_MODELS
-from ..message_processing import (
+# Local module imports (now absolute from app/ perspective)
+from models import OpenAIRequest, OpenAIMessage
+from auth import get_api_key
+from main import credential_manager # Assuming Uvicorn handles this via app.main
+import config as app_config
+from vertex_ai_init import VERTEX_EXPRESS_MODELS
+from message_processing import (
     create_gemini_prompt,
     create_encrypted_gemini_prompt,
     create_encrypted_full_gemini_prompt
 )
-from ..api_helpers import (
+from api_helpers import (
     create_generation_config,
     create_openai_error_response,
     execute_gemini_call
