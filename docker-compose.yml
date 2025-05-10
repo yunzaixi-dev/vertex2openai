@@ -11,8 +11,6 @@ services:
     volumes:
       - ./credentials:/app/credentials
     environment:
-      # This is kept for backward compatibility but our app now primarily uses the credential manager
-      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/service-account.json
       # Directory where credential files are stored (used by credential manager)
       - CREDENTIALS_DIR=/app/credentials
       # API key for authentication (default: 123456)
