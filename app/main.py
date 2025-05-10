@@ -27,6 +27,7 @@ app.add_middleware(
 )
 
 credential_manager = CredentialManager()
+app.state.credential_manager = credential_manager # Store manager on app state
 
 # Include API routers
 app.include_router(models_api.router) 

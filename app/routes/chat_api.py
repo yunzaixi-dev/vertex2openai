@@ -1,6 +1,6 @@
 import asyncio
 import json # Needed for error streaming
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request # Added Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from typing import List, Dict, Any
 
@@ -11,7 +11,7 @@ from google import genai
 # Local module imports (now absolute from app/ perspective)
 from models import OpenAIRequest, OpenAIMessage
 from auth import get_api_key
-from main import credential_manager # Assuming Uvicorn handles this via app.main
+# from main import credential_manager # Removed, will use request.app.state
 import config as app_config
 from vertex_ai_init import VERTEX_EXPRESS_MODELS
 from message_processing import (
@@ -32,8 +32,10 @@ async def _temp_list_models_for_validation():
 
 
 @router.post("/v1/chat/completions")
-async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_api_key)):
+async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api_key: str = Depends(get_api_key)):
     try:
+        # Access credential_manager from app state
+        credential_manager_instance = fastapi_request.app.state.credential_manager
         models_response = await _temp_list_models_for_validation()
         available_models_ids = [model["id"] for model in models_response.get("data", [])]
         # This list should be kept in sync with the models actually supported by the adapter's logic.
@@ -85,7 +87,7 @@ async def chat_completions(request: OpenAIRequest, api_key: str = Depends(get_ap
                 client_to_use = None
 
         if client_to_use is None:
-            rotated_credentials, rotated_project_id = credential_manager.get_random_credentials()
+            rotated_credentials, rotated_project_id = credential_manager_instance.get_random_credentials()
             if rotated_credentials and rotated_project_id:
                 try:
                     client_to_use = genai.Client(vertexai=True, credentials=rotated_credentials, project=rotated_project_id, location="us-central1")
