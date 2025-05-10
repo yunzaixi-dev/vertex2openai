@@ -27,31 +27,12 @@ from api_helpers import (
 
 router = APIRouter()
 
-async def _temp_list_models_for_validation():
-    return {"data": [{"id": model_name} for model_name in VERTEX_EXPRESS_MODELS]}
-
 
 @router.post("/v1/chat/completions")
 async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api_key: str = Depends(get_api_key)):
     try:
         # Access credential_manager from app state
         credential_manager_instance = fastapi_request.app.state.credential_manager
-        models_response = await _temp_list_models_for_validation()
-        available_models_ids = [model["id"] for model in models_response.get("data", [])]
-        # This list should be kept in sync with the models actually supported by the adapter's logic.
-        extended_available_models = set(available_models_ids + [
-            "gemini-2.5-pro-exp-03-25", "gemini-2.5-pro-exp-03-25-search", "gemini-2.5-pro-exp-03-25-encrypt", "gemini-2.5-pro-exp-03-25-encrypt-full", "gemini-2.5-pro-exp-03-25-auto",
-            "gemini-2.5-pro-preview-03-25", "gemini-2.5-pro-preview-03-25-search", "gemini-2.5-pro-preview-03-25-encrypt", "gemini-2.5-pro-preview-03-25-encrypt-full", "gemini-2.5-pro-preview-03-25-auto",
-            "gemini-2.5-pro-preview-05-06", "gemini-2.5-pro-preview-05-06-search", "gemini-2.5-pro-preview-05-06-encrypt", "gemini-2.5-pro-preview-05-06-encrypt-full", "gemini-2.5-pro-preview-05-06-auto",
-            "gemini-2.0-flash", "gemini-2.0-flash-search", "gemini-2.0-flash-lite", "gemini-2.0-flash-lite-search",
-            "gemini-2.0-pro-exp-02-05", "gemini-1.5-flash",
-            "gemini-2.5-flash-preview-04-17", "gemini-2.5-flash-preview-04-17-encrypt", "gemini-2.5-flash-preview-04-17-nothinking", "gemini-2.5-flash-preview-04-17-max",
-            "gemini-1.5-flash-8b", "gemini-1.5-pro", "gemini-1.0-pro-002", "gemini-1.0-pro-vision-001", "gemini-embedding-exp"
-        ])
-
-        if not request.model or request.model not in extended_available_models:
-            return JSONResponse(status_code=400, content=create_openai_error_response(400, f"Model '{request.model}' not found or not supported by this adapter.", "invalid_request_error"))
-
         is_auto_model = request.model.endswith("-auto")
         is_grounded_search = request.model.endswith("-search")
         is_encrypted_model = request.model.endswith("-encrypt")
@@ -64,15 +45,8 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         elif is_grounded_search: base_model_name = request.model.replace("-search", "")
         elif is_encrypted_model: base_model_name = request.model.replace("-encrypt", "")
         elif is_encrypted_full_model: base_model_name = request.model.replace("-encrypt-full", "")
-        elif is_nothinking_model:
-            base_model_name = request.model.replace("-nothinking","")
-            if base_model_name != "gemini-2.5-flash-preview-04-17":
-                return JSONResponse(status_code=400, content=create_openai_error_response(400, f"Model '{request.model}' does not support -nothinking variant", "invalid_request_error"))
-        elif is_max_thinking_model:
-            base_model_name = request.model.replace("-max","")
-            if base_model_name != "gemini-2.5-flash-preview-04-17":
-                return JSONResponse(status_code=400, content=create_openai_error_response(400, f"Model '{request.model}' does not support -max variant", "invalid_request_error"))
-
+        elif is_nothinking_model: base_model_name = request.model.replace("-nothinking","")
+        elif is_max_thinking_model: base_model_name = request.model.replace("-max","")
         generation_config = create_generation_config(request)
 
         client_to_use = None
