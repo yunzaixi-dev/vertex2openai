@@ -6,7 +6,7 @@ import urllib.parse
 from typing import List, Dict, Any, Union, Literal # Optional removed
 
 from google.genai import types
-from .models import OpenAIMessage, ContentPartText, ContentPartImage
+from models import OpenAIMessage, ContentPartText, ContentPartImage # Changed from relative
 
 # Define supported roles for Gemini API
 SUPPORTED_ROLES = ["user", "model"]
