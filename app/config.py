@@ -20,6 +20,6 @@ FAKE_STREAMING_ENABLED = os.environ.get("FAKE_STREAMING", "false").lower() == "t
 FAKE_STREAMING_INTERVAL_SECONDS = float(os.environ.get("FAKE_STREAMING_INTERVAL", "1.0"))
 
 # URL for the remote JSON file containing model lists
-MODELS_CONFIG_URL = os.environ.get("MODELS_CONFIG_URL") # No default, should be provided
+MODELS_CONFIG_URL = os.environ.get("MODELS_CONFIG_URL", "https://gist.githubusercontent.com/gzzhongqi/e0b684f319437a859bcf5bd6203fd1f6/raw")
 
 # Validation logic moved to app/auth.py
