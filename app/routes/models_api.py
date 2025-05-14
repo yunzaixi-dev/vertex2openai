@@ -2,7 +2,7 @@ import time
 from fastapi import APIRouter, Depends
 from typing import List, Dict, Any # Will be needed for constructing model dicts
 from auth import get_api_key
-from ..model_loader import get_vertex_models, get_vertex_express_models, refresh_models_config_cache
+from model_loader import get_vertex_models, get_vertex_express_models, refresh_models_config_cache # Changed from relative
 
 router = APIRouter()
 
