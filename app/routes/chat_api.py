@@ -11,7 +11,7 @@ from google import genai
 # Local module imports
 from models import OpenAIRequest, OpenAIMessage
 from auth import get_api_key
-from main import credential_manager # Accessing the instance from main.py
+# from main import credential_manager # Removed to prevent circular import; accessed via request.app.state
 import config as app_config
 from model_loader import get_vertex_models, get_vertex_express_models # Import from model_loader
 from message_processing import (
