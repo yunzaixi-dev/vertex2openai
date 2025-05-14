@@ -1,26 +1,46 @@
 import time
-from fastapi import APIRouter, Depends
-from typing import List, Dict, Any # Will be needed for constructing model dicts
+from fastapi import APIRouter, Depends, Request # Added Request
+from typing import List, Dict, Any
 from auth import get_api_key
-from model_loader import get_vertex_models, get_vertex_express_models, refresh_models_config_cache # Changed from relative
+from model_loader import get_vertex_models, get_vertex_express_models, refresh_models_config_cache
+import config as app_config # Import config
+from credentials_manager import CredentialManager # To check its type
 
 router = APIRouter()
 
 @router.get("/v1/models")
-async def list_models(api_key: str = Depends(get_api_key)):
-    # Attempt to refresh the cache. If it fails, getters will use the old cache.
+async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_key)):
     await refresh_models_config_cache()
     
-    vertex_model_ids = await get_vertex_models()
-    vertex_express_model_ids = await get_vertex_express_models()
+    # Access credential_manager from app state
+    credential_manager_instance: CredentialManager = fastapi_request.app.state.credential_manager
+
+    has_sa_creds = credential_manager_instance.get_total_credentials() > 0
+    has_express_key = bool(app_config.VERTEX_EXPRESS_API_KEY_VAL)
+
+    raw_vertex_models = await get_vertex_models()
+    raw_express_models = await get_vertex_express_models()
     
-    # Combine and unique model IDs.
-    # We should also consider creating the OpenAI model suffixes (-search, -encrypt, -auto)
-    # based on the base models available, similar to how chat_api.py currently does.
-    # For simplicity here, we'll list all unique base models from the config
-    # and then also list the specific variations.
-    
-    all_model_ids = set(vertex_model_ids + vertex_express_model_ids)
+    candidate_model_ids = set()
+
+    if has_express_key:
+        candidate_model_ids.update(raw_express_models)
+        # If *only* express key is available, only express models (and their variants) should be listed.
+        # The current `vertex_model_ids` from remote config might contain non-express models.
+        # The `get_vertex_express_models()` should be the source of truth for express-eligible base models.
+        if not has_sa_creds:
+            # Only list models that are explicitly in the express list.
+            # Suffix generation will apply only to these if they are not gemini-2.0
+            all_model_ids = set(raw_express_models)
+        else:
+            # Both SA and Express are available, combine all known models
+            all_model_ids = set(raw_vertex_models + raw_express_models)
+    elif has_sa_creds:
+        # Only SA creds available, use all vertex_models (which might include express-eligible ones)
+        all_model_ids = set(raw_vertex_models)
+    else:
+        # No credentials available
+        all_model_ids = set()
     
     # Create extended model list with variations (search, encrypt, auto etc.)
     # This logic might need to be more sophisticated based on actual supported features per base model.
