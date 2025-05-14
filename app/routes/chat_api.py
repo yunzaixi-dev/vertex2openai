@@ -37,21 +37,23 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         # Suffixes that can be appended to base models.
         # The remote model config should ideally be the source of truth for all valid permutations.
         standard_suffixes = ["-search", "-encrypt", "-encrypt-full", "-auto"]
-        special_suffix_map = { # For models with unique suffixes not covered by standard ones
-            "gemini-2.5-flash-preview-04-17": ["-nothinking", "-max"]
-        }
+        # No longer using special_suffix_map, will use prefix check instead
 
         all_allowed_model_ids = set(vertex_model_ids) # Start with base models from config
         for base_id in vertex_model_ids: # Iterate over base models to add suffixed versions
-            for suffix in standard_suffixes:
-                all_allowed_model_ids.add(f"{base_id}{suffix}")
-            if base_id in special_suffix_map:
-                for special_suffix in special_suffix_map[base_id]:
+            # Apply standard suffixes only if not gemini-2.0
+            if not base_id.startswith("gemini-2.0"):
+                for suffix in standard_suffixes:
+                    all_allowed_model_ids.add(f"{base_id}{suffix}")
+            
+            # Apply special suffixes for models starting with "gemini-2.5-flash"
+            if base_id.startswith("gemini-2.5-flash"):
+                special_flash_suffixes = ["-nothinking", "-max"]
+                for special_suffix in special_flash_suffixes:
                     all_allowed_model_ids.add(f"{base_id}{special_suffix}")
         
-        # Add express models to the allowed list as well, as they are distinct
-        # and might not be covered by the base vertex_models list from remote config.
-        # Alternatively, the remote config's vertex_models should include express models if they are also usable as base.
+        # Add express models to the allowed list as well.
+        # These should be full names from the remote config.
         vertex_express_model_ids = await get_vertex_express_models()
         all_allowed_model_ids.update(vertex_express_model_ids)
 
