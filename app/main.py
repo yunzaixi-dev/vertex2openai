@@ -35,8 +35,8 @@ app.include_router(chat_api.router)
 
 @app.on_event("startup")
 async def startup_event():
-    if init_vertex_ai(credential_manager):
-        print("INFO: Fallback Vertex AI client initialization check completed successfully.")
+    if await init_vertex_ai(credential_manager): # Added await
+        print("INFO: Vertex AI credential and model config initialization check completed successfully.")
     else:
         print("ERROR: Failed to initialize a fallback Vertex AI client. API will likely fail.")
 

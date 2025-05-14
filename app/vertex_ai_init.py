@@ -1,20 +1,17 @@
 import json
+import asyncio # Added for await
 from google import genai
-from credentials_manager import CredentialManager, parse_multiple_json_credentials # Changed from relative
-import config as app_config # Changed from relative
+from credentials_manager import CredentialManager, parse_multiple_json_credentials
+import config as app_config
+from model_loader import refresh_models_config_cache # Import new model loader function
 
-# VERTEX_EXPRESS_API_KEY constant is removed, direct string "VERTEX_EXPRESS_API_KEY" will be used in chat_api.py
-VERTEX_EXPRESS_MODELS = [
-    "gemini-2.0-flash-001",
-    "gemini-2.0-flash-lite-001",
-    "gemini-2.5-pro-preview-03-25",
-    "gemini-2.5-flash-preview-04-17",
-    "gemini-2.5-pro-preview-05-06",
-]
+# VERTEX_EXPRESS_MODELS list is now dynamically loaded via model_loader
+# The constant VERTEX_EXPRESS_MODELS previously defined here is removed.
+# Consumers should use get_vertex_express_models() from model_loader.
 
 # Global 'client' and 'get_vertex_client()' are removed.
 
-def init_vertex_ai(credential_manager_instance: CredentialManager) -> bool:
+async def init_vertex_ai(credential_manager_instance: CredentialManager) -> bool: # Made async
     """
     Initializes the credential manager with credentials from GOOGLE_CREDENTIALS_JSON (if provided)
     and verifies if any credentials (environment or file-based through the manager) are available.
@@ -64,6 +61,16 @@ def init_vertex_ai(credential_manager_instance: CredentialManager) -> bool:
                 print(f"WARNING: Error processing GOOGLE_CREDENTIALS_JSON env var: {e_json_env}.")
         else:
             print("INFO: GOOGLE_CREDENTIALS_JSON environment variable not found.")
+
+        # Attempt to pre-warm the model configuration cache
+        print("INFO: Attempting to pre-warm model configuration cache during startup...")
+        models_loaded_successfully = await refresh_models_config_cache()
+        if models_loaded_successfully:
+            print("INFO: Model configuration cache pre-warmed successfully.")
+        else:
+            print("WARNING: Failed to pre-warm model configuration cache during startup. It will be loaded lazily on first request.")
+            # We don't necessarily fail the entire init_vertex_ai if model list fetching fails,
+            # as credential validation might still be important, and model list can be fetched later.
 
         # CredentialManager's __init__ calls load_credentials_list() for files.
         # refresh_credentials_list() re-scans files and combines with in-memory (already includes env creds if loaded above).
