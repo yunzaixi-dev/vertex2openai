@@ -2,9 +2,8 @@ version: '3.8'
 
 services:
   openai-to-gemini:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: gzzhongqi/vertex2api:latest
+    container_name: vertex2api
     ports:
       # Map host port 8050 to container port 7860 (for Hugging Face compatibility)
       - "8050:7860"

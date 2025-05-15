@@ -270,7 +270,7 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
             # This means if `request.model` was "gemini-1.5-pro-search", `base_model_name` becomes "gemini-1.5-pro"
             # but the API call might need the full "gemini-1.5-pro-search".
             # Let's use `request.model` for the API call here, and `base_model_name` for checks like Express eligibility.
-            return await execute_gemini_call(client_to_use, api_model_string, current_prompt_func, generation_config, request)
+            return await execute_gemini_call(client_to_use, base_model_name, current_prompt_func, generation_config, request)
 
     except Exception as e:
         error_msg = f"Unexpected error in chat_completions endpoint: {str(e)}"
