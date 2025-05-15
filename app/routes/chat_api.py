@@ -7,6 +7,8 @@ from typing import List, Dict, Any
 # Google and OpenAI specific imports
 from google.genai import types
 from google import genai
+import openai
+from credentials_manager import _refresh_auth
 
 # Local module imports
 from models import OpenAIRequest, OpenAIMessage
@@ -31,6 +33,8 @@ router = APIRouter()
 async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api_key: str = Depends(get_api_key)):
     try:
         credential_manager_instance = fastapi_request.app.state.credential_manager
+        OPENAI_DIRECT_SUFFIX = "-openai"
+        EXPERIMENTAL_MARKER = "-exp-"
         
         # Dynamically fetch allowed models for validation
         vertex_model_ids = await get_vertex_models()
@@ -58,9 +62,16 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         all_allowed_model_ids.update(vertex_express_model_ids)
 
 
+# Add potential -openai models if they contain -exp-
+        potential_openai_direct_models = set()
+        for base_id in vertex_model_ids: # vertex_model_ids are base models
+            if EXPERIMENTAL_MARKER in base_id:
+                potential_openai_direct_models.add(f"{base_id}{OPENAI_DIRECT_SUFFIX}")
+        all_allowed_model_ids.update(potential_openai_direct_models)
         if not request.model or request.model not in all_allowed_model_ids:
             return JSONResponse(status_code=400, content=create_openai_error_response(400, f"Model '{request.model}' not found or not supported by this adapter. Valid models are: {sorted(list(all_allowed_model_ids))}", "invalid_request_error"))
 
+        is_openai_direct_model = request.model.endswith(OPENAI_DIRECT_SUFFIX) and EXPERIMENTAL_MARKER in request.model
         is_auto_model = request.model.endswith("-auto")
         is_grounded_search = request.model.endswith("-search")
         is_encrypted_model = request.model.endswith("-encrypt")
@@ -71,7 +82,9 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
 
         # Determine base_model_name by stripping known suffixes
         # This order matters if a model could have multiple (e.g. -encrypt-auto, though not currently a pattern)
-        if is_auto_model: base_model_name = request.model[:-len("-auto")]
+        if is_openai_direct_model:
+            base_model_name = request.model[:-len(OPENAI_DIRECT_SUFFIX)]
+        elif is_auto_model: base_model_name = request.model[:-len("-auto")]
         elif is_grounded_search: base_model_name = request.model[:-len("-search")]
         elif is_encrypted_full_model: base_model_name = request.model[:-len("-encrypt-full")] # Must be before -encrypt
         elif is_encrypted_model: base_model_name = request.model[:-len("-encrypt")]
@@ -113,8 +126,95 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
             return JSONResponse(status_code=500, content=create_openai_error_response(500, "Vertex AI client not available. Ensure credentials are set up correctly (env var or files).", "server_error"))
 
         encryption_instructions_placeholder = ["// Protocol Instructions Placeholder //"] # Actual instructions are in message_processing
+        if is_openai_direct_model:
+            print(f"INFO: Using OpenAI Direct Path for model: {request.model}")
+            # This mode exclusively uses rotated credentials, not express keys.
+            rotated_credentials, rotated_project_id = credential_manager_instance.get_random_credentials()
 
-        if is_auto_model:
+            if not rotated_credentials or not rotated_project_id:
+                error_msg = "OpenAI Direct Mode requires GCP credentials, but none were available or loaded successfully."
+                print(f"ERROR: {error_msg}")
+                return JSONResponse(status_code=500, content=create_openai_error_response(500, error_msg, "server_error"))
+
+            print(f"INFO: [OpenAI Direct Path] Using credentials for project: {rotated_project_id}")
+            gcp_token = _refresh_auth(rotated_credentials)
+
+            if not gcp_token:
+                error_msg = f"Failed to obtain valid GCP token for OpenAI client (Source: Credential Manager, Project: {rotated_project_id})."
+                print(f"ERROR: {error_msg}")
+                return JSONResponse(status_code=500, content=create_openai_error_response(500, error_msg, "server_error"))
+
+            PROJECT_ID = rotated_project_id
+            LOCATION = "us-central1" # Fixed as per user confirmation
+            VERTEX_AI_OPENAI_ENDPOINT_URL = (
+                f"https://{LOCATION}-aiplatform.googleapis.com/v1beta1/"
+                f"projects/{PROJECT_ID}/locations/{LOCATION}/endpoints/openapi"
+            )
+            # base_model_name is already extracted (e.g., "gemini-1.5-pro-exp-v1")
+            UNDERLYING_MODEL_ID = f"google/{base_model_name}"
+
+            openai_client = openai.AsyncOpenAI(
+                base_url=VERTEX_AI_OPENAI_ENDPOINT_URL,
+                api_key=gcp_token, # OAuth token
+            )
+
+            openai_safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
+                {"category": 'HARM_CATEGORY_CIVIC_INTEGRITY', "threshold": 'OFF'}
+            ]
+
+            openai_params = {
+                "model": UNDERLYING_MODEL_ID,
+                "messages": [msg.model_dump(exclude_unset=True) for msg in request.messages],
+                "temperature": request.temperature,
+                "max_tokens": request.max_tokens,
+                "top_p": request.top_p,
+                "stream": request.stream,
+                "stop": request.stop,
+                "seed": request.seed,
+                "n": request.n,
+            }
+            openai_params = {k: v for k, v in openai_params.items() if v is not None}
+
+            openai_extra_body = {
+                'google': {
+                    'safety_settings': openai_safety_settings
+                }
+            }
+
+            if request.stream:
+                async def openai_stream_generator():
+                    try:
+                        stream_response = await openai_client.chat.completions.create(
+                            **openai_params,
+                            extra_body=openai_extra_body
+                        )
+                        async for chunk in stream_response:
+                            yield f"data: {chunk.model_dump_json()}\n\n"
+                        yield "data: [DONE]\n\n"
+                    except Exception as stream_error:
+                        error_msg_stream = f"Error during OpenAI client streaming for {request.model}: {str(stream_error)}"
+                        print(f"ERROR: {error_msg_stream}")
+                        error_response_content = create_openai_error_response(500, error_msg_stream, "server_error")
+                        yield f"data: {json.dumps(error_response_content)}\n\n" # Ensure json is imported
+                        yield "data: [DONE]\n\n"
+                return StreamingResponse(openai_stream_generator(), media_type="text/event-stream")
+            else: # Not streaming
+                try:
+                    response = await openai_client.chat.completions.create(
+                        **openai_params,
+                        extra_body=openai_extra_body
+                    )
+                    return JSONResponse(content=response.model_dump(exclude_unset=True))
+                except Exception as generate_error:
+                    error_msg_generate = f"Error calling OpenAI client for {request.model}: {str(generate_error)}"
+                    print(f"ERROR: {error_msg_generate}")
+                    error_response = create_openai_error_response(500, error_msg_generate, "server_error")
+                    return JSONResponse(status_code=500, content=error_response)
+        elif is_auto_model:
             print(f"Processing auto model: {request.model}")
             attempts = [
                 {"name": "base", "model": base_model_name, "prompt_func": create_gemini_prompt, "config_modifier": lambda c: c},

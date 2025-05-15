@@ -3,6 +3,7 @@ import glob
 import random
 import json
 from typing import List, Dict, Any
+from google.auth.transport.requests import Request as AuthRequest
 from google.oauth2 import service_account
 import config as app_config # Changed from relative
 
@@ -51,6 +52,22 @@ def parse_multiple_json_credentials(json_str: str) -> List[Dict[str, Any]]:
 
     print(f"DEBUG: Parsed {len(credentials_list)} credential objects from the input string.")
     return credentials_list
+def _refresh_auth(credentials):
+    """Helper function to refresh GCP token."""
+    if not credentials:
+        print("ERROR: _refresh_auth called with no credentials.")
+        return None
+    try:
+        # Assuming credentials object has a project_id attribute for logging
+        project_id_for_log = getattr(credentials, 'project_id', 'Unknown')
+        print(f"INFO: Attempting to refresh token for project: {project_id_for_log}...")
+        credentials.refresh(AuthRequest())
+        print(f"INFO: Token refreshed successfully for project: {project_id_for_log}")
+        return credentials.token
+    except Exception as e:
+        project_id_for_log = getattr(credentials, 'project_id', 'Unknown')
+        print(f"ERROR: Error refreshing GCP token for project {project_id_for_log}: {e}")
+        return None
 
 
 # Credential Manager for handling multiple service accounts

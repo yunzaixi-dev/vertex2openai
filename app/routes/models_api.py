@@ -12,6 +12,8 @@ router = APIRouter()
 async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_key)):
     await refresh_models_config_cache()
     
+    OPENAI_DIRECT_SUFFIX = "-openai"
+    EXPERIMENTAL_MARKER = "-exp-"
     # Access credential_manager from app state
     credential_manager_instance: CredentialManager = fastapi_request.app.state.credential_manager
 
@@ -80,7 +82,22 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
                         "permission": [], "root": model_id, "parent": None
                     })
 
-    # Ensure uniqueness again after adding suffixes
-    final_models_data_map = {m["id"]: m for m in dynamic_models_data}
+        # Ensure uniqueness again after adding suffixes
+        # Add OpenAI direct variations for experimental models if SA creds are available
+        if has_sa_creds: # OpenAI direct mode only works with SA credentials
+            # We should iterate through the base models that could be experimental.
+            # `raw_vertex_models` should contain these.
+            for model_id in raw_vertex_models: # Iterate through the original list of base models
+                if EXPERIMENTAL_MARKER in model_id:
+                    suffixed_id = f"{model_id}{OPENAI_DIRECT_SUFFIX}"
+                    # Check if already added (e.g. if remote config somehow already listed it)
+                    if not any(m['id'] == suffixed_id for m in dynamic_models_data):
+                        dynamic_models_data.append({
+                            "id": suffixed_id, "object": "model", "created": current_time, "owned_by": "google",
+                            "permission": [], "root": model_id, "parent": None
+                        })
+    # final_models_data_map = {m["id"]: m for m in dynamic_models_data}
+    # model_list = list(final_models_data_map.values())
+    # model_list.sort()
     
-    return {"object": "list", "data": list(final_models_data_map.values())}
+    return {"object": "list", "data": sorted(dynamic_models_data, key=lambda x: x['id'])}
