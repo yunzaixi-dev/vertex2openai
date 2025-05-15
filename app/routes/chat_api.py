@@ -1,5 +1,6 @@
 import asyncio
 import json # Needed for error streaming
+import random
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from typing import List, Dict, Any
@@ -100,16 +101,29 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         generation_config = create_generation_config(request)
 
         client_to_use = None
-        express_api_key_val = app_config.VERTEX_EXPRESS_API_KEY_VAL
+        express_api_keys_list = app_config.VERTEX_EXPRESS_API_KEY_VAL
         
         # Use dynamically fetched express models list for this check
-        if express_api_key_val and base_model_name in vertex_express_model_ids: # Check against base_model_name
-            try:
-                client_to_use = genai.Client(vertexai=True, api_key=express_api_key_val)
-                print(f"INFO: Using Vertex Express Mode for model {base_model_name}.")
-            except Exception as e:
-                print(f"ERROR: Vertex Express Mode client init failed: {e}. Falling back.")
-                client_to_use = None
+        if express_api_keys_list and base_model_name in vertex_express_model_ids: # Check against base_model_name
+            indexed_keys = list(enumerate(express_api_keys_list))
+            random.shuffle(indexed_keys)
+            
+            for original_idx, key_val in indexed_keys:
+                try:
+                    client_to_use = genai.Client(vertexai=True, api_key=key_val)
+                    print(f"INFO: Using Vertex Express Mode for model {base_model_name} with API key (original index: {original_idx}).")
+                    break # Successfully initialized client
+                except Exception as e:
+                    print(f"WARNING: Vertex Express Mode client init failed for API key (original index: {original_idx}): {e}. Trying next key if available.")
+                    client_to_use = None # Ensure client_to_use is None if this attempt fails
+            
+            if client_to_use is None:
+                print(f"WARNING: All {len(express_api_keys_list)} Vertex Express API key(s) failed to initialize for model {base_model_name}. Falling back.")
+        # else:
+        #     if not express_api_keys_list:
+        #         print(f"DEBUG: No Vertex Express API keys configured. Skipping Express Mode attempt for model {base_model_name}.")
+        #     elif base_model_name not in vertex_express_model_ids:
+        #         print(f"DEBUG: Model {base_model_name} is not in the Vertex Express model list. Skipping Express Mode attempt.")
 
         if client_to_use is None:
             rotated_credentials, rotated_project_id = credential_manager_instance.get_random_credentials()

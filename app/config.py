@@ -13,7 +13,11 @@ CREDENTIALS_DIR = os.environ.get("CREDENTIALS_DIR", "/app/credentials")
 GOOGLE_CREDENTIALS_JSON_STR = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
 # API Key for Vertex Express Mode
-VERTEX_EXPRESS_API_KEY_VAL = os.environ.get("VERTEX_EXPRESS_API_KEY")
+raw_vertex_keys = os.environ.get("VERTEX_EXPRESS_API_KEY")
+if raw_vertex_keys:
+    VERTEX_EXPRESS_API_KEY_VAL = [key.strip() for key in raw_vertex_keys.split(',') if key.strip()]
+else:
+    VERTEX_EXPRESS_API_KEY_VAL = []
 
 # Fake streaming settings for debugging/testing
 FAKE_STREAMING_ENABLED = os.environ.get("FAKE_STREAMING", "false").lower() == "true"
