@@ -108,7 +108,7 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
             rotated_credentials, rotated_project_id = credential_manager_instance.get_random_credentials()
             if rotated_credentials and rotated_project_id:
                 try:
-                    client_to_use = genai.Client(vertexai=True, credentials=rotated_credentials, project=rotated_project_id, location="us-central1")
+                    client_to_use = genai.Client(vertexai=True, credentials=rotated_credentials, project=rotated_project_id, location="global")
                     print(f"INFO: Using rotated credential for project: {rotated_project_id}")
                 except Exception as e:
                     print(f"ERROR: Rotated credential client init failed: {e}. Falling back.")
@@ -138,9 +138,9 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                 return JSONResponse(status_code=500, content=create_openai_error_response(500, error_msg, "server_error"))
 
             PROJECT_ID = rotated_project_id
-            LOCATION = "us-central1" # Fixed as per user confirmation
+            LOCATION = "global" # Fixed as per user confirmation
             VERTEX_AI_OPENAI_ENDPOINT_URL = (
-                f"https://{LOCATION}-aiplatform.googleapis.com/v1beta1/"
+                f"https://aiplatform.googleapis.com/v1beta1/"
                 f"projects/{PROJECT_ID}/locations/{LOCATION}/endpoints/openapi"
             )
             # base_model_name is already extracted (e.g., "gemini-1.5-pro-exp-v1")

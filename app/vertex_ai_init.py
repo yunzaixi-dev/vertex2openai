@@ -85,7 +85,7 @@ async def init_vertex_ai(credential_manager_instance: CredentialManager) -> bool
             temp_creds_val, temp_project_id_val = credential_manager_instance.get_random_credentials()
             if temp_creds_val and temp_project_id_val:
                 try:
-                    _ = genai.Client(vertexai=True, credentials=temp_creds_val, project=temp_project_id_val, location="us-central1")
+                    _ = genai.Client(vertexai=True, credentials=temp_creds_val, project=temp_project_id_val, location="global")
                     print(f"INFO: Successfully validated a credential from Credential Manager (Project: {temp_project_id_val}). Initialization check passed.")
                     return True
                 except Exception as e_val:
