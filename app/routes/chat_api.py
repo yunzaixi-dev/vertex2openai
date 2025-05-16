@@ -186,13 +186,34 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                             extra_body=openai_extra_body
                         )
                         async for chunk in stream_response:
-                            yield f"data: {chunk.model_dump_json()}\n\n"
+                            try:
+                                yield f"data: {chunk.model_dump_json()}\n\n"
+                            except Exception as chunk_serialization_error:
+                                error_msg_chunk = f"Error serializing OpenAI chunk for {request.model}: {str(chunk_serialization_error)}. Chunk: {str(chunk)[:200]}"
+                                print(f"ERROR: {error_msg_chunk}")
+                                # Truncate
+                                if len(error_msg_chunk) > 1024:
+                                    error_msg_chunk = error_msg_chunk[:1024] + "..."
+                                error_response_chunk = create_openai_error_response(500, error_msg_chunk, "server_error")
+                                json_payload_for_chunk_error = json.dumps(error_response_chunk)
+                                print(f"DEBUG: Yielding chunk serialization error JSON payload (OpenAI path): {json_payload_for_chunk_error}")
+                                yield f"data: {json_payload_for_chunk_error}\n\n"
+                                yield "data: [DONE]\n\n"
+                                return # Stop further processing for this request
                         yield "data: [DONE]\n\n"
                     except Exception as stream_error:
-                        error_msg_stream = f"Error during OpenAI client streaming for {request.model}: {str(stream_error)}"
+                        original_error_message = str(stream_error)
+                        # Truncate very long error messages
+                        if len(original_error_message) > 1024:
+                            original_error_message = original_error_message[:1024] + "..."
+                        
+                        error_msg_stream = f"Error during OpenAI client streaming for {request.model}: {original_error_message}"
                         print(f"ERROR: {error_msg_stream}")
+                        
                         error_response_content = create_openai_error_response(500, error_msg_stream, "server_error")
-                        yield f"data: {json.dumps(error_response_content)}\n\n" # Ensure json is imported
+                        json_payload_for_stream_error = json.dumps(error_response_content)
+                        print(f"DEBUG: Yielding stream error JSON payload (OpenAI path): {json_payload_for_stream_error}")
+                        yield f"data: {json_payload_for_stream_error}\n\n"
                         yield "data: [DONE]\n\n"
                 return StreamingResponse(openai_stream_generator(), media_type="text/event-stream")
             else: # Not streaming
