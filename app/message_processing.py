@@ -344,11 +344,14 @@ def convert_to_openai_format(gemini_response, model: str) -> Dict[str, Any]:
         for i, candidate in enumerate(gemini_response.candidates):
             content = ""
             if hasattr(candidate, 'text'):
-                content = candidate.text
+                content = candidate.text or "" # Coalesce None to empty string
             elif hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                # Ensure content remains a string even if parts have None text
+                parts_texts = []
                 for part_item in candidate.content.parts:
-                    if hasattr(part_item, 'text'):
-                        content += part_item.text
+                    if hasattr(part_item, 'text') and part_item.text is not None:
+                        parts_texts.append(part_item.text)
+                content = "".join(parts_texts)
             
             if is_encrypt_full:
                 content = deobfuscate_text(content)
@@ -359,9 +362,9 @@ def convert_to_openai_format(gemini_response, model: str) -> Dict[str, Any]:
                 "finish_reason": "stop"
             })
     elif hasattr(gemini_response, 'text'):
-         content = gemini_response.text
+         content = gemini_response.text or "" # Coalesce None to empty string
          if is_encrypt_full:
-             content = deobfuscate_text(content)
+             content = deobfuscate_text(content) # deobfuscate_text should also be robust to empty string
          choices.append({
              "index": 0,
              "message": {"role": "assistant", "content": content},
@@ -392,14 +395,27 @@ def convert_to_openai_format(gemini_response, model: str) -> Dict[str, Any]:
 def convert_chunk_to_openai(chunk, model: str, response_id: str, candidate_index: int = 0) -> str:
     """Converts Gemini stream chunk to OpenAI format, applying deobfuscation if needed."""
     is_encrypt_full = model.endswith("-encrypt-full")
-    chunk_content = ""
+    chunk_content_str = "" # Renamed for clarity and to ensure it's always a string
 
-    if hasattr(chunk, 'parts') and chunk.parts:
-         for part_item in chunk.parts:
-             if hasattr(part_item, 'text'):
-                 chunk_content += part_item.text
-    elif hasattr(chunk, 'text'):
-         chunk_content = chunk.text
+    try:
+        if hasattr(chunk, 'parts') and chunk.parts:
+            current_parts_texts = []
+            for part_item in chunk.parts:
+                # Ensure part_item.text exists, is not None, and convert to string
+                if hasattr(part_item, 'text') and part_item.text is not None:
+                    current_parts_texts.append(str(part_item.text))
+            chunk_content_str = "".join(current_parts_texts)
+        elif hasattr(chunk, 'text') and chunk.text is not None:
+            # Ensure chunk.text is converted to string if it's not None
+            chunk_content_str = str(chunk.text)
+        # If chunk has neither .parts nor .text, or if .text is None, chunk_content_str remains ""
+    except Exception as e_chunk_extract:
+        # Log the error and the problematic chunk structure
+        print(f"WARNING: Error extracting content from chunk in convert_chunk_to_openai: {e_chunk_extract}. Chunk type: {type(chunk)}. Chunk data: {str(chunk)[:200]}")
+        chunk_content_str = "" # Default to empty string in case of any error
+
+    if is_encrypt_full:
+        chunk_content_str = deobfuscate_text(chunk_content_str) # deobfuscate_text should handle empty string
 
     if is_encrypt_full:
         chunk_content = deobfuscate_text(chunk_content)
@@ -415,7 +431,7 @@ def convert_chunk_to_openai(chunk, model: str, response_id: str, candidate_index
         "choices": [
             {
                 "index": candidate_index,
-                "delta": {**({"content": chunk_content} if chunk_content else {})},
+                "delta": {**({"content": chunk_content_str} if chunk_content_str else {})},
                 "finish_reason": finish_reason
             }
         ]

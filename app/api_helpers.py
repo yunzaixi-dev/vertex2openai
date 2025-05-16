@@ -45,21 +45,39 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     return config
 
 def is_response_valid(response):
-    if response is None: return False
-    if hasattr(response, 'text') and response.text: return True
+    if response is None:
+        print("DEBUG: Response is None, therefore invalid.")
+        return False
+    
+    # Check for direct text attribute
+    if hasattr(response, 'text') and isinstance(response.text, str) and response.text.strip():
+        # print("DEBUG: Response valid due to response.text")
+        return True
+        
+    # Check candidates for text content
     if hasattr(response, 'candidates') and response.candidates:
-        candidate = response.candidates[0]
-        if hasattr(candidate, 'text') and candidate.text: return True
-        if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-            for part in candidate.content.parts:
-                if hasattr(part, 'text') and part.text: return True
-    if hasattr(response, 'candidates') and response.candidates: return True # For fake streaming
-    for attr in dir(response):
-        if attr.startswith('_'): continue
-        try:
-            if isinstance(getattr(response, attr), str) and getattr(response, attr): return True
-        except: pass
-    print("DEBUG: Response is invalid, no usable content found")
+        for candidate in response.candidates: # Iterate through all candidates
+            if hasattr(candidate, 'text') and isinstance(candidate.text, str) and candidate.text.strip():
+                # print(f"DEBUG: Response valid due to candidate.text in candidate")
+                return True
+            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts') and candidate.content.parts:
+                for part in candidate.content.parts:
+                    if hasattr(part, 'text') and isinstance(part.text, str) and part.text.strip():
+                        # print(f"DEBUG: Response valid due to part.text in candidate's content part")
+                        return True
+                        
+    # Check for prompt_feedback, which indicates the API processed the request,
+    # even if the content is empty (e.g. due to safety filtering).
+    # The fake_stream_generator should still attempt to process this to convey safety messages if present.
+    if hasattr(response, 'prompt_feedback'):
+        # Check if there's any block reason, which might be interesting to log or handle
+        if hasattr(response.prompt_feedback, 'block_reason') and response.prompt_feedback.block_reason:
+            print(f"DEBUG: Response has prompt_feedback with block_reason: {response.prompt_feedback.block_reason}, considering it valid for processing.")
+        else:
+            print("DEBUG: Response has prompt_feedback (no block_reason), considering it valid for processing.")
+        return True
+        
+    print("DEBUG: Response is invalid, no usable text content or prompt_feedback found.")
     return False
 
 async def fake_stream_generator(client_instance, model_name: str, prompt: Union[types.Content, List[types.Content]], current_gen_config: Dict[str, Any], request_obj: OpenAIRequest):
@@ -83,12 +101,20 @@ async def fake_stream_generator(client_instance, model_name: str, prompt: Union[
             if not is_response_valid(response): 
                 raise ValueError(f"Invalid/empty response in fake stream: {str(response)[:200]}")
             full_text = ""
-            if hasattr(response, 'text'): full_text = response.text
+            if hasattr(response, 'text'):
+                full_text = response.text or "" # Coalesce None to empty string
             elif hasattr(response, 'candidates') and response.candidates:
+                # Typically, we focus on the first candidate for non-streaming synthesis
                 candidate = response.candidates[0]
-                if hasattr(candidate, 'text'): full_text = candidate.text
-                elif hasattr(candidate.content, 'parts'):
-                    full_text = "".join(part.text for part in candidate.content.parts if hasattr(part, 'text'))
+                if hasattr(candidate, 'text'):
+                    full_text = candidate.text or "" # Coalesce None to empty string
+                elif hasattr(candidate, 'content') and hasattr(candidate.content, 'parts') and candidate.content.parts:
+                    # Ensure parts are iterated and text is joined correctly even if some parts have no text or part.text is None
+                    texts = []
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'text') and part.text is not None: # Check part.text exists and is not None
+                            texts.append(part.text)
+                    full_text = "".join(texts)
             if request_obj.model.endswith("-encrypt-full"):
                 full_text = deobfuscate_text(full_text)
             
@@ -141,8 +167,16 @@ async def execute_gemini_call(
                 yield "data: [DONE]\n\n"
             except Exception as e_stream_call:
                 print(f"Streaming Error in _execute_gemini_call: {e_stream_call}")
-                err_resp_content_call = create_openai_error_response(500, str(e_stream_call), "server_error")
-                yield f"data: {json.dumps(err_resp_content_call)}\n\n"
+                
+                error_message_str = str(e_stream_call)
+                # Truncate very long error messages to prevent excessively large JSON payloads.
+                if len(error_message_str) > 1024: # Max length for the error string
+                    error_message_str = error_message_str[:1024] + "..."
+                
+                err_resp_content_call = create_openai_error_response(500, error_message_str, "server_error")
+                json_payload_for_error = json.dumps(err_resp_content_call)
+                print(f"DEBUG: Yielding error JSON payload during true streaming: {json_payload_for_error}")
+                yield f"data: {json_payload_for_error}\n\n"
                 yield "data: [DONE]\n\n"
                 raise # Re-raise to be caught by retry logic if any
         return StreamingResponse(_stream_generator_inner_for_execute(), media_type="text/event-stream")
