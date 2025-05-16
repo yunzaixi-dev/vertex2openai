@@ -36,43 +36,21 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         credential_manager_instance = fastapi_request.app.state.credential_manager
         OPENAI_DIRECT_SUFFIX = "-openai"
         EXPERIMENTAL_MARKER = "-exp-"
+        PAY_PREFIX = "[PAY]"
         
-        # Dynamically fetch allowed models for validation
-        vertex_model_ids = await get_vertex_models()
-        # Suffixes that can be appended to base models.
-        # The remote model config should ideally be the source of truth for all valid permutations.
-        standard_suffixes = ["-search", "-encrypt", "-encrypt-full", "-auto"]
-        # No longer using special_suffix_map, will use prefix check instead
-
-        all_allowed_model_ids = set(vertex_model_ids) # Start with base models from config
-        for base_id in vertex_model_ids: # Iterate over base models to add suffixed versions
-            # Apply standard suffixes only if not gemini-2.0
-            if not base_id.startswith("gemini-2.0"):
-                for suffix in standard_suffixes:
-                    all_allowed_model_ids.add(f"{base_id}{suffix}")
-            
-            # Apply special suffixes for models starting with "gemini-2.5-flash"
-            if base_id.startswith("gemini-2.5-flash"):
-                special_flash_suffixes = ["-nothinking", "-max"]
-                for special_suffix in special_flash_suffixes:
-                    all_allowed_model_ids.add(f"{base_id}{special_suffix}")
-        
-        # Add express models to the allowed list as well.
-        # These should be full names from the remote config.
+        # Model validation based on a predefined list has been removed as per user request.
+        # The application will now attempt to use any provided model string.
+        # We still need to fetch vertex_express_model_ids for the Express Mode logic.
         vertex_express_model_ids = await get_vertex_express_models()
-        all_allowed_model_ids.update(vertex_express_model_ids)
 
-
-# Add potential -openai models if they contain -exp-
-        potential_openai_direct_models = set()
-        for base_id in vertex_model_ids: # vertex_model_ids are base models
-            if EXPERIMENTAL_MARKER in base_id:
-                potential_openai_direct_models.add(f"{base_id}{OPENAI_DIRECT_SUFFIX}")
-        all_allowed_model_ids.update(potential_openai_direct_models)
-        if not request.model or request.model not in all_allowed_model_ids:
-            return JSONResponse(status_code=400, content=create_openai_error_response(400, f"Model '{request.model}' not found or not supported by this adapter. Valid models are: {sorted(list(all_allowed_model_ids))}", "invalid_request_error"))
-
-        is_openai_direct_model = request.model.endswith(OPENAI_DIRECT_SUFFIX) and EXPERIMENTAL_MARKER in request.model
+        # Updated logic for is_openai_direct_model
+        is_openai_direct_model = False
+        if request.model.endswith(OPENAI_DIRECT_SUFFIX):
+            temp_name_for_marker_check = request.model[:-len(OPENAI_DIRECT_SUFFIX)]
+            if temp_name_for_marker_check.startswith(PAY_PREFIX):
+                is_openai_direct_model = True
+            elif EXPERIMENTAL_MARKER in temp_name_for_marker_check:
+                is_openai_direct_model = True
         is_auto_model = request.model.endswith("-auto")
         is_grounded_search = request.model.endswith("-search")
         is_encrypted_model = request.model.endswith("-encrypt")
@@ -84,7 +62,11 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         # Determine base_model_name by stripping known suffixes
         # This order matters if a model could have multiple (e.g. -encrypt-auto, though not currently a pattern)
         if is_openai_direct_model:
-            base_model_name = request.model[:-len(OPENAI_DIRECT_SUFFIX)]
+            temp_base_name = request.model[:-len(OPENAI_DIRECT_SUFFIX)]
+            if temp_base_name.startswith(PAY_PREFIX):
+                base_model_name = temp_base_name[len(PAY_PREFIX):]
+            else:
+                base_model_name = temp_base_name
         elif is_auto_model: base_model_name = request.model[:-len("-auto")]
         elif is_grounded_search: base_model_name = request.model[:-len("-search")]
         elif is_encrypted_full_model: base_model_name = request.model[:-len("-encrypt-full")] # Must be before -encrypt
@@ -119,11 +101,6 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
             
             if client_to_use is None:
                 print(f"WARNING: All {len(express_api_keys_list)} Vertex Express API key(s) failed to initialize for model {base_model_name}. Falling back.")
-        # else:
-        #     if not express_api_keys_list:
-        #         print(f"DEBUG: No Vertex Express API keys configured. Skipping Express Mode attempt for model {base_model_name}.")
-        #     elif base_model_name not in vertex_express_model_ids:
-        #         print(f"DEBUG: Model {base_model_name} is not in the Vertex Express model list. Skipping Express Mode attempt.")
 
         if client_to_use is None:
             rotated_credentials, rotated_project_id = credential_manager_instance.get_random_credentials()
