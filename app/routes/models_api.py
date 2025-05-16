@@ -54,33 +54,45 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
     current_time = int(time.time())
 
     # Add base models and their variations
-    for model_id in sorted(list(all_model_ids)):
+    for original_model_id in sorted(list(all_model_ids)):
+        current_display_prefix = ""
+        if has_sa_creds and not has_express_key and EXPERIMENTAL_MARKER not in original_model_id:
+            current_display_prefix = PAY_PREFIX
+        
+        base_display_id = f"{current_display_prefix}{original_model_id}"
+        
         dynamic_models_data.append({
-            "id": model_id, "object": "model", "created": current_time, "owned_by": "google",
-            "permission": [], "root": model_id, "parent": None
+            "id": base_display_id, "object": "model", "created": current_time, "owned_by": "google",
+            "permission": [], "root": original_model_id, "parent": None
         })
         
         # Conditionally add common variations (standard suffixes)
-        if not model_id.startswith("gemini-2.0"):
+        if not original_model_id.startswith("gemini-2.0"): # Suffix rules based on original_model_id
             standard_suffixes = ["-search", "-encrypt", "-encrypt-full", "-auto"]
             for suffix in standard_suffixes:
-                suffixed_id = f"{model_id}{suffix}"
-                # Check if this suffixed ID is already in all_model_ids (fetched from remote) or already added to dynamic_models_data
-                if suffixed_id not in all_model_ids and not any(m['id'] == suffixed_id for m in dynamic_models_data):
+                # Suffix is applied to the original model ID part
+                suffixed_model_part = f"{original_model_id}{suffix}"
+                # Then the whole thing is prefixed
+                final_suffixed_display_id = f"{current_display_prefix}{suffixed_model_part}"
+                
+                # Check if this suffixed ID is already in all_model_ids (unlikely with prefix) or already added
+                if final_suffixed_display_id not in all_model_ids and not any(m['id'] == final_suffixed_display_id for m in dynamic_models_data):
                     dynamic_models_data.append({
-                        "id": suffixed_id, "object": "model", "created": current_time, "owned_by": "google",
-                        "permission": [], "root": model_id, "parent": None
+                        "id": final_suffixed_display_id, "object": "model", "created": current_time, "owned_by": "google",
+                        "permission": [], "root": original_model_id, "parent": None
                     })
         
         # Apply special suffixes for models starting with "gemini-2.5-flash"
-        if model_id.startswith("gemini-2.5-flash"):
+        if original_model_id.startswith("gemini-2.5-flash"): # Suffix rules based on original_model_id
             special_flash_suffixes = ["-nothinking", "-max"]
             for special_suffix in special_flash_suffixes:
-                suffixed_id = f"{model_id}{special_suffix}"
-                if suffixed_id not in all_model_ids and not any(m['id'] == suffixed_id for m in dynamic_models_data):
+                suffixed_model_part = f"{original_model_id}{special_suffix}"
+                final_special_suffixed_display_id = f"{current_display_prefix}{suffixed_model_part}"
+
+                if final_special_suffixed_display_id not in all_model_ids and not any(m['id'] == final_special_suffixed_display_id for m in dynamic_models_data):
                     dynamic_models_data.append({
-                        "id": suffixed_id, "object": "model", "created": current_time, "owned_by": "google",
-                        "permission": [], "root": model_id, "parent": None
+                        "id": final_special_suffixed_display_id, "object": "model", "created": current_time, "owned_by": "google",
+                        "permission": [], "root": original_model_id, "parent": None
                     })
 
         # Ensure uniqueness again after adding suffixes

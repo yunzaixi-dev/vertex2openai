@@ -62,11 +62,8 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         # Determine base_model_name by stripping known suffixes
         # This order matters if a model could have multiple (e.g. -encrypt-auto, though not currently a pattern)
         if is_openai_direct_model:
-            temp_base_name = request.model[:-len(OPENAI_DIRECT_SUFFIX)]
-            if temp_base_name.startswith(PAY_PREFIX):
-                base_model_name = temp_base_name[len(PAY_PREFIX):]
-            else:
-                base_model_name = temp_base_name
+            # The general PAY_PREFIX stripper later will handle if this result starts with [PAY]
+            base_model_name = request.model[:-len(OPENAI_DIRECT_SUFFIX)]
         elif is_auto_model: base_model_name = request.model[:-len("-auto")]
         elif is_grounded_search: base_model_name = request.model[:-len("-search")]
         elif is_encrypted_full_model: base_model_name = request.model[:-len("-encrypt-full")] # Must be before -encrypt
@@ -74,6 +71,11 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         elif is_nothinking_model: base_model_name = request.model[:-len("-nothinking")]
         elif is_max_thinking_model: base_model_name = request.model[:-len("-max")]
         
+        # After all suffix stripping, if PAY_PREFIX is still at the start of base_model_name, remove it.
+        # This handles cases like "[PAY]model-id-search" correctly.
+        if base_model_name.startswith(PAY_PREFIX):
+            base_model_name = base_model_name[len(PAY_PREFIX):]
+            
         # Specific model variant checks (if any remain exclusive and not covered dynamically)
         if is_nothinking_model and base_model_name != "gemini-2.5-flash-preview-04-17":
             return JSONResponse(status_code=400, content=create_openai_error_response(400, f"Model '{request.model}' (-nothinking) is only supported for 'gemini-2.5-flash-preview-04-17'.", "invalid_request_error"))
