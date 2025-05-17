@@ -240,7 +240,8 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                 print(f"Auto-mode attempting: '{attempt['name']}' for model {attempt['model']}")
                 current_gen_config = attempt["config_modifier"](generation_config.copy())
                 try:
-                    return await execute_gemini_call(client_to_use, attempt["model"], attempt["prompt_func"], current_gen_config, request)
+                    # Pass is_auto_attempt=True for auto-mode calls
+                    return await execute_gemini_call(client_to_use, attempt["model"], attempt["prompt_func"], current_gen_config, request, is_auto_attempt=True)
                 except Exception as e_auto:
                     last_err = e_auto
                     print(f"Auto-attempt '{attempt['name']}' for model {attempt['model']} failed: {e_auto}")
@@ -251,11 +252,15 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
             if not request.stream and last_err:
                  return JSONResponse(status_code=500, content=create_openai_error_response(500, err_msg, "server_error"))
             elif request.stream: 
-                async def final_error_stream():
+                # This is the final error handling for auto-mode if all attempts fail AND it was a streaming request
+                async def final_auto_error_stream():
                     err_content = create_openai_error_response(500, err_msg, "server_error")
-                    yield f"data: {json.dumps(err_content)}\n\n"
+                    json_payload_final_auto_error = json.dumps(err_content)
+                    # Log the final error being sent to client after all auto-retries failed
+                    print(f"DEBUG: Auto-mode all attempts failed. Yielding final error JSON: {json_payload_final_auto_error}")
+                    yield f"data: {json_payload_final_auto_error}\n\n"
                     yield "data: [DONE]\n\n"
-                return StreamingResponse(final_error_stream(), media_type="text/event-stream")
+                return StreamingResponse(final_auto_error_stream(), media_type="text/event-stream")
             return JSONResponse(status_code=500, content=create_openai_error_response(500, "All auto-mode attempts failed without specific error.", "server_error"))
 
         else: # Not an auto model
@@ -284,6 +289,7 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
             # This means if `request.model` was "gemini-1.5-pro-search", `base_model_name` becomes "gemini-1.5-pro"
             # but the API call might need the full "gemini-1.5-pro-search".
             # Let's use `request.model` for the API call here, and `base_model_name` for checks like Express eligibility.
+            # For non-auto mode, is_auto_attempt defaults to False in execute_gemini_call
             return await execute_gemini_call(client_to_use, base_model_name, current_prompt_func, generation_config, request)
 
     except Exception as e:

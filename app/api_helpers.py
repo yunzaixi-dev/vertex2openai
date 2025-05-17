@@ -66,21 +66,13 @@ def is_response_valid(response):
                         # print(f"DEBUG: Response valid due to part.text in candidate's content part")
                         return True
                         
-    # Check for prompt_feedback, which indicates the API processed the request,
-    # even if the content is empty (e.g. due to safety filtering).
-    # The fake_stream_generator should still attempt to process this to convey safety messages if present.
-    if hasattr(response, 'prompt_feedback'):
-        # Check if there's any block reason, which might be interesting to log or handle
-        if hasattr(response.prompt_feedback, 'block_reason') and response.prompt_feedback.block_reason:
-            print(f"DEBUG: Response has prompt_feedback with block_reason: {response.prompt_feedback.block_reason}, considering it valid for processing.")
-        else:
-            print("DEBUG: Response has prompt_feedback (no block_reason), considering it valid for processing.")
-        return True
-        
-    print("DEBUG: Response is invalid, no usable text content or prompt_feedback found.")
+    # Removed prompt_feedback as a sole criterion for validity.
+    # It should only be valid if actual text content is found.
+    # Block reasons will be checked explicitly by callers if they need to treat it as an error for retries.
+    print("DEBUG: Response is invalid, no usable text content found by is_response_valid.")
     return False
 
-async def fake_stream_generator(client_instance, model_name: str, prompt: Union[types.Content, List[types.Content]], current_gen_config: Dict[str, Any], request_obj: OpenAIRequest):
+async def fake_stream_generator(client_instance, model_name: str, prompt: Union[types.Content, List[types.Content]], current_gen_config: Dict[str, Any], request_obj: OpenAIRequest, is_auto_attempt: bool):
     response_id = f"chatcmpl-{int(time.time())}"
     async def fake_stream_inner():
         print(f"FAKE STREAMING: Making non-streaming request to Gemini API (Model: {model_name})")
@@ -98,8 +90,20 @@ async def fake_stream_generator(client_instance, model_name: str, prompt: Union[
             await asyncio.sleep(app_config.FAKE_STREAMING_INTERVAL_SECONDS)
         try:
             response = api_call_task.result()
-            if not is_response_valid(response): 
-                raise ValueError(f"Invalid/empty response in fake stream: {str(response)[:200]}")
+
+            # Check for safety blocks first, as this should trigger a retry in auto-mode
+            if hasattr(response, 'prompt_feedback') and \
+               hasattr(response.prompt_feedback, 'block_reason') and \
+               response.prompt_feedback.block_reason:
+                block_message = f"Response blocked by safety filter: {response.prompt_feedback.block_reason}"
+                if hasattr(response.prompt_feedback, 'block_reason_message') and response.prompt_feedback.block_reason_message:
+                    block_message = f"Response blocked by safety filter: {response.prompt_feedback.block_reason_message} (Reason: {response.prompt_feedback.block_reason})"
+                print(f"DEBUG: {block_message} (in fake_stream_generator)") # Log this specific condition
+                raise ValueError(block_message) # This will be caught by the except Exception as e below it
+
+            if not is_response_valid(response): # is_response_valid now only checks for actual text
+                raise ValueError(f"Invalid/empty response in fake stream (no text content): {str(response)[:200]}")
+            
             full_text = ""
             if hasattr(response, 'text'):
                 full_text = response.text or "" # Coalesce None to empty string
@@ -136,10 +140,12 @@ async def fake_stream_generator(client_instance, model_name: str, prompt: Union[
             # It's good practice to log the JSON payload here too for consistency,
             # though the main concern was the true streaming path.
             json_payload_for_fake_stream_error = json.dumps(err_resp)
-            print(f"DEBUG: Yielding error JSON payload during fake streaming: {json_payload_for_fake_stream_error}")
-            yield f"data: {json_payload_for_fake_stream_error}\n\n"
-            yield "data: [DONE]\n\n"
-            raise # Re-raise the exception to allow auto-mode retries
+            # Log the error JSON that WOULD have been sent if not in auto-mode or if this was the final error handler.
+            print(f"DEBUG: Internal error in fake_stream_generator. JSON error for handler: {json_payload_for_fake_stream_error}")
+            if not is_auto_attempt:
+                yield f"data: {json_payload_for_fake_stream_error}\n\n"
+                yield "data: [DONE]\n\n"
+            raise e # Re-raise the original exception e
     return fake_stream_inner()
 
 async def execute_gemini_call(
@@ -147,14 +153,15 @@ async def execute_gemini_call(
     model_to_call: str, 
     prompt_func: Callable[[List[OpenAIMessage]], Union[types.Content, List[types.Content]]], 
     gen_config_for_call: Dict[str, Any],
-    request_obj: OpenAIRequest # Pass the whole request object
+    request_obj: OpenAIRequest, # Pass the whole request object
+    is_auto_attempt: bool = False
 ):
     actual_prompt_for_call = prompt_func(request_obj.messages)
     
     if request_obj.stream:
         if app_config.FAKE_STREAMING_ENABLED:
             return StreamingResponse(
-                await fake_stream_generator(current_client, model_to_call, actual_prompt_for_call, gen_config_for_call, request_obj), 
+                await fake_stream_generator(current_client, model_to_call, actual_prompt_for_call, gen_config_for_call, request_obj, is_auto_attempt=is_auto_attempt),
                 media_type="text/event-stream"
             )
 
@@ -180,15 +187,28 @@ async def execute_gemini_call(
                 
                 err_resp_content_call = create_openai_error_response(500, error_message_str, "server_error")
                 json_payload_for_error = json.dumps(err_resp_content_call)
-                print(f"DEBUG: Yielding error JSON payload during true streaming: {json_payload_for_error}")
-                yield f"data: {json_payload_for_error}\n\n"
-                yield "data: [DONE]\n\n"
-                raise # Re-raise to be caught by retry logic if any
+                # Log the error JSON that WOULD have been sent if not in auto-mode or if this was the final error handler.
+                print(f"DEBUG: Internal error in _stream_generator_inner_for_execute. JSON error for handler: {json_payload_for_error}")
+                if not is_auto_attempt: # is_auto_attempt is from execute_gemini_call's scope
+                    yield f"data: {json_payload_for_error}\n\n"
+                    yield "data: [DONE]\n\n"
+                raise e_stream_call # Re-raise the original exception
         return StreamingResponse(_stream_generator_inner_for_execute(), media_type="text/event-stream")
     else: 
         response_obj_call = await current_client.aio.models.generate_content(
             model=model_to_call, contents=actual_prompt_for_call, config=gen_config_for_call
         )
-        if not is_response_valid(response_obj_call):
-            raise ValueError("Invalid/empty response from non-streaming Gemini call in _execute_gemini_call.")
+
+        # Check for safety blocks first for non-streaming calls
+        if hasattr(response_obj_call, 'prompt_feedback') and \
+           hasattr(response_obj_call.prompt_feedback, 'block_reason') and \
+           response_obj_call.prompt_feedback.block_reason:
+            block_message = f"Response blocked by safety filter: {response_obj_call.prompt_feedback.block_reason}"
+            if hasattr(response_obj_call.prompt_feedback, 'block_reason_message') and response_obj_call.prompt_feedback.block_reason_message:
+                block_message = f"Response blocked by safety filter: {response_obj_call.prompt_feedback.block_reason_message} (Reason: {response_obj_call.prompt_feedback.block_reason})"
+            print(f"DEBUG: {block_message} (in execute_gemini_call non-streaming)") # Log this specific condition
+            raise ValueError(block_message)
+
+        if not is_response_valid(response_obj_call): # is_response_valid now only checks for actual text
+            raise ValueError("Invalid/empty response from non-streaming Gemini call (no text content).")
         return JSONResponse(content=convert_to_openai_format(response_obj_call, request_obj.model))
