@@ -133,8 +133,13 @@ async def fake_stream_generator(client_instance, model_name: str, prompt: Union[
             err_msg = f"Error in fake_stream_generator: {str(e)}"
             print(err_msg)
             err_resp = create_openai_error_response(500, err_msg, "server_error")
-            yield f"data: {json.dumps(err_resp)}\n\n"
+            # It's good practice to log the JSON payload here too for consistency,
+            # though the main concern was the true streaming path.
+            json_payload_for_fake_stream_error = json.dumps(err_resp)
+            print(f"DEBUG: Yielding error JSON payload during fake streaming: {json_payload_for_fake_stream_error}")
+            yield f"data: {json_payload_for_fake_stream_error}\n\n"
             yield "data: [DONE]\n\n"
+            raise # Re-raise the exception to allow auto-mode retries
     return fake_stream_inner()
 
 async def execute_gemini_call(
