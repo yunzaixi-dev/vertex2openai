@@ -37,11 +37,12 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         OPENAI_DIRECT_SUFFIX = "-openai"
         EXPERIMENTAL_MARKER = "-exp-"
         PAY_PREFIX = "[PAY]"
+        EXPRESS_PREFIX = "[EXPRESS] " # Note the space for easier stripping
         
         # Model validation based on a predefined list has been removed as per user request.
         # The application will now attempt to use any provided model string.
         # We still need to fetch vertex_express_model_ids for the Express Mode logic.
-        vertex_express_model_ids = await get_vertex_express_models()
+        # vertex_express_model_ids = await get_vertex_express_models() # We'll use the prefix now
 
         # Updated logic for is_openai_direct_model
         is_openai_direct_model = False
@@ -57,25 +58,37 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         is_encrypted_full_model = request.model.endswith("-encrypt-full")
         is_nothinking_model = request.model.endswith("-nothinking")
         is_max_thinking_model = request.model.endswith("-max")
-        base_model_name = request.model
+        base_model_name = request.model # Start with the full model name
 
-        # Determine base_model_name by stripping known suffixes
-        # This order matters if a model could have multiple (e.g. -encrypt-auto, though not currently a pattern)
-        if is_openai_direct_model:
-            # The general PAY_PREFIX stripper later will handle if this result starts with [PAY]
-            base_model_name = request.model[:-len(OPENAI_DIRECT_SUFFIX)]
-        elif is_auto_model: base_model_name = request.model[:-len("-auto")]
-        elif is_grounded_search: base_model_name = request.model[:-len("-search")]
-        elif is_encrypted_full_model: base_model_name = request.model[:-len("-encrypt-full")] # Must be before -encrypt
-        elif is_encrypted_model: base_model_name = request.model[:-len("-encrypt")]
-        elif is_nothinking_model: base_model_name = request.model[:-len("-nothinking")]
-        elif is_max_thinking_model: base_model_name = request.model[:-len("-max")]
+        # Determine base_model_name by stripping known prefixes and suffixes
+        # Order of stripping: Prefixes first, then suffixes.
         
-        # After all suffix stripping, if PAY_PREFIX is still at the start of base_model_name, remove it.
-        # This handles cases like "[PAY]model-id-search" correctly.
+        is_express_model_request = False
+        if base_model_name.startswith(EXPRESS_PREFIX):
+            is_express_model_request = True
+            base_model_name = base_model_name[len(EXPRESS_PREFIX):]
+
         if base_model_name.startswith(PAY_PREFIX):
             base_model_name = base_model_name[len(PAY_PREFIX):]
-            
+
+        # Suffix stripping (applied to the name after prefix removal)
+        # This order matters if a model could have multiple (e.g. -encrypt-auto, though not currently a pattern)
+        if is_openai_direct_model: # This check is based on request.model, so it's fine here
+            # If it was an OpenAI direct model, its base name is request.model minus suffix.
+            # We need to ensure PAY_PREFIX or EXPRESS_PREFIX are also stripped if they were part of the original.
+            temp_base_for_openai = request.model[:-len(OPENAI_DIRECT_SUFFIX)]
+            if temp_base_for_openai.startswith(EXPRESS_PREFIX):
+                temp_base_for_openai = temp_base_for_openai[len(EXPRESS_PREFIX):]
+            if temp_base_for_openai.startswith(PAY_PREFIX):
+                temp_base_for_openai = temp_base_for_openai[len(PAY_PREFIX):]
+            base_model_name = temp_base_for_openai # Assign the fully stripped name
+        elif is_auto_model: base_model_name = base_model_name[:-len("-auto")]
+        elif is_grounded_search: base_model_name = base_model_name[:-len("-search")]
+        elif is_encrypted_full_model: base_model_name = base_model_name[:-len("-encrypt-full")] # Must be before -encrypt
+        elif is_encrypted_model: base_model_name = base_model_name[:-len("-encrypt")]
+        elif is_nothinking_model: base_model_name = base_model_name[:-len("-nothinking")]
+        elif is_max_thinking_model: base_model_name = base_model_name[:-len("-max")]
+        
         # Specific model variant checks (if any remain exclusive and not covered dynamically)
         if is_nothinking_model and base_model_name != "gemini-2.5-flash-preview-04-17":
             return JSONResponse(status_code=400, content=create_openai_error_response(400, f"Model '{request.model}' (-nothinking) is only supported for 'gemini-2.5-flash-preview-04-17'.", "invalid_request_error"))
@@ -86,37 +99,65 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
 
         client_to_use = None
         express_api_keys_list = app_config.VERTEX_EXPRESS_API_KEY_VAL
-        
-        # Use dynamically fetched express models list for this check
-        if express_api_keys_list and base_model_name in vertex_express_model_ids: # Check against base_model_name
+
+        # This client initialization logic is for Gemini models.
+        # OpenAI Direct models have their own client setup and will return before this.
+        if is_openai_direct_model:
+            # OpenAI Direct logic is self-contained and will return.
+            # If it doesn't return, it means we proceed to Gemini logic, which shouldn't happen
+            # if is_openai_direct_model is true. The main if/elif/else for model types handles this.
+            pass
+        elif is_express_model_request:
+            if not express_api_keys_list:
+                error_msg = f"Model '{request.model}' is an Express model and requires an Express API key, but none are configured."
+                print(f"ERROR: {error_msg}")
+                return JSONResponse(status_code=401, content=create_openai_error_response(401, error_msg, "authentication_error"))
+
+            print(f"INFO: Attempting Vertex Express Mode for model request: {request.model} (base: {base_model_name})")
             indexed_keys = list(enumerate(express_api_keys_list))
             random.shuffle(indexed_keys)
             
             for original_idx, key_val in indexed_keys:
                 try:
                     client_to_use = genai.Client(vertexai=True, api_key=key_val)
-                    print(f"INFO: Using Vertex Express Mode for model {base_model_name} with API key (original index: {original_idx}).")
+                    print(f"INFO: Using Vertex Express Mode for model {request.model} (base: {base_model_name}) with API key (original index: {original_idx}).")
                     break # Successfully initialized client
                 except Exception as e:
-                    print(f"WARNING: Vertex Express Mode client init failed for API key (original index: {original_idx}): {e}. Trying next key if available.")
-                    client_to_use = None # Ensure client_to_use is None if this attempt fails
-            
-            if client_to_use is None:
-                print(f"WARNING: All {len(express_api_keys_list)} Vertex Express API key(s) failed to initialize for model {base_model_name}. Falling back.")
+                    print(f"WARNING: Vertex Express Mode client init failed for API key (original index: {original_idx}) for model {request.model}: {e}. Trying next key.")
+                    client_to_use = None # Ensure client_to_use is None for this attempt
 
-        if client_to_use is None:
+            if client_to_use is None: # All configured Express keys failed
+                error_msg = f"All configured Express API keys failed to initialize for model '{request.model}'."
+                print(f"ERROR: {error_msg}")
+                return JSONResponse(status_code=500, content=create_openai_error_response(500, error_msg, "server_error"))
+        
+        else: # Not an Express model request, therefore an SA credential model request for Gemini
+            print(f"INFO: Model '{request.model}' is an SA credential request for Gemini. Attempting SA credentials.")
             rotated_credentials, rotated_project_id = credential_manager_instance.get_random_credentials()
+            
             if rotated_credentials and rotated_project_id:
                 try:
                     client_to_use = genai.Client(vertexai=True, credentials=rotated_credentials, project=rotated_project_id, location="global")
-                    print(f"INFO: Using rotated credential for project: {rotated_project_id}")
+                    print(f"INFO: Using SA credential for Gemini model {request.model} (project: {rotated_project_id})")
                 except Exception as e:
-                    print(f"ERROR: Rotated credential client init failed: {e}. Falling back.")
-                    client_to_use = None
-        
-        if client_to_use is None:
-            print("ERROR: No Vertex AI client could be initialized via Express Mode or Rotated Credentials.")
-            return JSONResponse(status_code=500, content=create_openai_error_response(500, "Vertex AI client not available. Ensure credentials are set up correctly (env var or files).", "server_error"))
+                    client_to_use = None # Ensure it's None on failure
+                    error_msg = f"SA credential client initialization failed for Gemini model '{request.model}': {e}."
+                    print(f"ERROR: {error_msg}")
+                    return JSONResponse(status_code=500, content=create_openai_error_response(500, error_msg, "server_error"))
+            else: # No SA credentials available for an SA model request
+                error_msg = f"Model '{request.model}' requires SA credentials for Gemini, but none are available or loaded."
+                print(f"ERROR: {error_msg}")
+                return JSONResponse(status_code=401, content=create_openai_error_response(401, error_msg, "authentication_error"))
+
+        # If we reach here and client_to_use is still None, it means it's an OpenAI Direct Model,
+        # which handles its own client and responses.
+        # For Gemini models (Express or SA), client_to_use must be set, or an error returned above.
+        if not is_openai_direct_model and client_to_use is None:
+             # This case should ideally not be reached if the logic above is correct,
+             # as each path (Express/SA for Gemini) should either set client_to_use or return an error.
+             # This is a safeguard.
+            print(f"CRITICAL ERROR: Client for Gemini model '{request.model}' was not initialized, and no specific error was returned. This indicates a logic flaw.")
+            return JSONResponse(status_code=500, content=create_openai_error_response(500, "Critical internal server error: Gemini client not initialized.", "server_error"))
 
         encryption_instructions_placeholder = ["// Protocol Instructions Placeholder //"] # Actual instructions are in message_processing
         if is_openai_direct_model:

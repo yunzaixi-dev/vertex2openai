@@ -56,7 +56,9 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
     # Add base models and their variations
     for original_model_id in sorted(list(all_model_ids)):
         current_display_prefix = ""
-        if has_sa_creds and not has_express_key and EXPERIMENTAL_MARKER not in original_model_id:
+        # Only add PAY_PREFIX if the model is not already an EXPRESS model (which has its own prefix)
+        if not original_model_id.startswith("[EXPRESS]") and \
+           has_sa_creds and not has_express_key and EXPERIMENTAL_MARKER not in original_model_id:
             current_display_prefix = PAY_PREFIX
         
         base_display_id = f"{current_display_prefix}{original_model_id}"
