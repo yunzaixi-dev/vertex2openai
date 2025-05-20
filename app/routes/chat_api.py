@@ -1,4 +1,5 @@
 import asyncio
+import base64 # Ensure base64 is imported
 import json # Needed for error streaming
 import random
 from fastapi import APIRouter, Depends, Request
@@ -7,6 +8,7 @@ from typing import List, Dict, Any
 
 # Google and OpenAI specific imports
 from google.genai import types
+from google.genai.types import HttpOptions # Added for compute_tokens
 from google import genai
 import openai
 from credentials_manager import _refresh_auth
@@ -290,39 +292,91 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                         extra_body=openai_extra_body
                     )
                     response_dict = response.model_dump(exclude_unset=True, exclude_none=True)
-
-                    # Process reasoning_tokens for non-streaming response
+                    
                     try:
                         usage = response_dict.get('usage')
+                        vertex_completion_tokens = 0
+                        
                         if usage and isinstance(usage, dict):
-                            completion_details = usage.get('completion_tokens_details')
-                            if completion_details and isinstance(completion_details, dict):
-                                num_reasoning_tokens = completion_details.get('reasoning_tokens')
-                                
-                                if isinstance(num_reasoning_tokens, int) and num_reasoning_tokens > 0:
-                                    choices = response_dict.get('choices')
-                                    if choices and isinstance(choices, list) and len(choices) > 0:
-                                        # Ensure choices[0] and message are dicts, model_dump makes them so
-                                        message_dict = choices[0].get('message')
-                                        if message_dict and isinstance(message_dict, dict):
-                                            full_content = message_dict.get('content')
-                                            if isinstance(full_content, str): # Ensure content is a string
-                                                reasoning_text = full_content[:num_reasoning_tokens]
-                                                actual_content = full_content[num_reasoning_tokens:]
-                                                
-                                                message_dict['reasoning_content'] = reasoning_text
-                                                message_dict['content'] = actual_content
-                                                
-                                                # Clean up Vertex-specific field
-                                                del completion_details['reasoning_tokens']
-                                                if not completion_details: # If dict is now empty
-                                                    del usage['completion_tokens_details']
-                                                if not usage: # If dict is now empty
-                                                    del response_dict['usage']
-                    except Exception as e_non_stream_reasoning:
-                        print(f"WARNING: Could not process non-streaming reasoning tokens for model {request.model}: {e_non_stream_reasoning}. Response will be returned as is from Vertex.")
-                        # Fallthrough to return response_dict as is if processing fails
+                            vertex_completion_tokens = usage.get('completion_tokens')
 
+                        choices = response_dict.get('choices')
+                        if choices and isinstance(choices, list) and len(choices) > 0:
+                            message_dict = choices[0].get('message')
+                            if message_dict and isinstance(message_dict, dict):
+                                # Always remove extra_content from the message if it exists, before any splitting
+                                if 'extra_content' in message_dict:
+                                    del message_dict['extra_content']
+                                    print("DEBUG: Removed 'extra_content' from response message.")
+
+                                if isinstance(vertex_completion_tokens, int) and vertex_completion_tokens > 0:
+                                    full_content = message_dict.get('content')
+                                    if isinstance(full_content, str) and full_content:
+                                        
+                                        def _get_token_strings_and_split_texts_sync(creds, proj_id, loc, model_id_for_tokenizer, text_to_tokenize, num_completion_tokens_from_usage):
+                                            sync_tokenizer_client = genai.Client(
+                                                vertexai=True, credentials=creds, project=proj_id, location=loc,
+                                                http_options=HttpOptions(api_version="v1")
+                                            )
+                                            if not text_to_tokenize: return "", text_to_tokenize, [] # No reasoning, original content, empty token list
+
+                                            token_compute_response = sync_tokenizer_client.models.compute_tokens(
+                                                model=model_id_for_tokenizer, contents=text_to_tokenize
+                                            )
+                                            
+                                            all_final_token_strings = []
+                                            if token_compute_response.tokens_info:
+                                                for token_info_item in token_compute_response.tokens_info:
+                                                    for api_token_bytes in token_info_item.tokens:
+                                                        intermediate_str = api_token_bytes.decode('utf-8', errors='replace')
+                                                        final_token_text = ""
+                                                        try:
+                                                            b64_decoded_bytes = base64.b64decode(intermediate_str)
+                                                            final_token_text = b64_decoded_bytes.decode('utf-8', errors='replace')
+                                                        except Exception:
+                                                            final_token_text = intermediate_str
+                                                        all_final_token_strings.append(final_token_text)
+                                            
+                                            if not all_final_token_strings: # Should not happen if text_to_tokenize is not empty
+                                                return "", text_to_tokenize, []
+
+                                            if not (0 < num_completion_tokens_from_usage <= len(all_final_token_strings)):
+                                                print(f"WARNING_TOKEN_SPLIT: num_completion_tokens_from_usage ({num_completion_tokens_from_usage}) is invalid for total client-tokenized tokens ({len(all_final_token_strings)}). Returning full content as 'content'.")
+                                                return "", "".join(all_final_token_strings), all_final_token_strings
+
+                                            completion_part_tokens = all_final_token_strings[-num_completion_tokens_from_usage:]
+                                            reasoning_part_tokens = all_final_token_strings[:-num_completion_tokens_from_usage]
+                                            
+                                            reasoning_output_str = "".join(reasoning_part_tokens)
+                                            completion_output_str = "".join(completion_part_tokens)
+                                            
+                                            return reasoning_output_str, completion_output_str, all_final_token_strings
+
+                                        model_id_for_tokenizer = base_model_name
+                                        
+                                        reasoning_text, actual_content, dbg_all_tokens = await asyncio.to_thread(
+                                            _get_token_strings_and_split_texts_sync,
+                                            rotated_credentials, PROJECT_ID, LOCATION,
+                                            model_id_for_tokenizer, full_content, vertex_completion_tokens
+                                        )
+
+                                        message_dict['content'] = actual_content # Set the new content (potentially from joined tokens)
+                                        if reasoning_text: # Only add reasoning_content if it's not empty
+                                            message_dict['reasoning_content'] = reasoning_text
+                                            print(f"DEBUG_REASONING_SPLIT_DIRECT_JOIN: Successful. Reasoning len: {len(reasoning_text)}. Content len: {len(actual_content)}")
+                                            print(f"  Vertex completion_tokens: {vertex_completion_tokens}. Our tokenizer total tokens: {len(dbg_all_tokens)}")
+                                        elif "".join(dbg_all_tokens) != full_content : # Content was re-joined from tokens but no reasoning
+                                            print(f"INFO: Content reconstructed from tokens. Original len: {len(full_content)}, Reconstructed len: {len(actual_content)}")
+                                        # else: No reasoning, and content is original full_content because num_completion_tokens was invalid or zero.
+                                            
+                                    else:
+                                         print(f"WARNING: Full content is not a string or is empty. Cannot perform split. Content: {full_content}")
+                                else:
+                                    print(f"INFO: No positive vertex_completion_tokens ({vertex_completion_tokens}) found in usage, or no message content. No split performed.")
+                                    
+                    except Exception as e_reasoning_processing:
+                        print(f"WARNING: Error during non-streaming reasoning token processing for model {request.model} due to: {e_reasoning_processing}.")
+                        
                     return JSONResponse(content=response_dict)
                 except Exception as generate_error:
                     error_msg_generate = f"Error calling OpenAI client for {request.model}: {str(generate_error)}"
