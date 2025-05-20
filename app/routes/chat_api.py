@@ -229,7 +229,6 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                         async for chunk in stream_response:
                             try:
                                 chunk_as_dict = chunk.model_dump(exclude_unset=True, exclude_none=True)
-                                print(chunk_as_dict)
                                 
                                 # Safely navigate and check for thought flag
                                 choices = chunk_as_dict.get('choices')
