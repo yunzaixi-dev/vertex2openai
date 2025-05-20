@@ -231,7 +231,6 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                         async for chunk in stream_response:
                             try:
                                 chunk_as_dict = chunk.model_dump(exclude_unset=True, exclude_none=True)
-                                print(chunk_as_dict)
                                 
                                 # Safely navigate and check for thought flag
                                 choices = chunk_as_dict.get('choices')
@@ -255,6 +254,7 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                                                     del delta['extra_content']
                                 
                                 # Yield the (potentially modified) dictionary as JSON
+                                print(chunk_as_dict)
                                 yield f"data: {json.dumps(chunk_as_dict)}\n\n"
 
                             except Exception as chunk_processing_error: # Catch errors from dict manipulation or json.dumps
