@@ -342,38 +342,81 @@ def convert_to_openai_format(gemini_response, model: str) -> Dict[str, Any]:
 
     if hasattr(gemini_response, 'candidates') and gemini_response.candidates:
         for i, candidate in enumerate(gemini_response.candidates):
-            content = ""
-            if hasattr(candidate, 'text'):
-                content = candidate.text or "" # Coalesce None to empty string
-            elif hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                # Ensure content remains a string even if parts have None text
-                parts_texts = []
-                for part_item in candidate.content.parts:
-                    if hasattr(part_item, 'text') and part_item.text is not None:
-                        parts_texts.append(part_item.text)
-                content = "".join(parts_texts)
+            print(candidate) # Existing print statement
+            reasoning_text_parts = []
+            normal_text_parts = []
             
+            gemini_candidate_content = None
+            if hasattr(candidate, 'content'):
+                gemini_candidate_content = candidate.content
+
+            if gemini_candidate_content:
+                try:
+                    if hasattr(gemini_candidate_content, 'parts') and gemini_candidate_content.parts:
+                        for part_item in gemini_candidate_content.parts:
+                            part_text = ""
+                            if hasattr(part_item, 'text') and part_item.text is not None:
+                                part_text = str(part_item.text)
+                            
+                            # Check for 'thought' attribute on part_item and append directly
+                            if hasattr(part_item, 'thought') and part_item.thought is True:
+                                reasoning_text_parts.append(part_text)
+                            else:
+                                normal_text_parts.append(part_text)
+                    elif hasattr(gemini_candidate_content, 'text') and gemini_candidate_content.text is not None:
+                        # If no 'parts', but 'text' exists on content, it's normal content
+                        normal_text_parts.append(str(gemini_candidate_content.text))
+                except Exception as e_extract:
+                    print(f"WARNING: Error extracting from candidate.content: {e_extract}. Content: {str(gemini_candidate_content)[:200]}")
+            # Fallback: if candidate.content is not informative, but candidate.text exists directly
+            elif hasattr(candidate, 'text') and candidate.text is not None:
+                 normal_text_parts.append(str(candidate.text))
+
+
+            final_reasoning_content_str = "".join(reasoning_text_parts)
+            final_normal_content_str = "".join(normal_text_parts)
+
             if is_encrypt_full:
-                content = deobfuscate_text(content)
+                final_reasoning_content_str = deobfuscate_text(final_reasoning_content_str)
+                final_normal_content_str = deobfuscate_text(final_normal_content_str)
+
+            message_payload = {"role": "assistant"}
+            if final_reasoning_content_str:
+                message_payload['reasoning_content'] = final_reasoning_content_str
+            
+            # Ensure 'content' key is present, even if empty or None, as per OpenAI spec for assistant messages
+            # if not final_normal_content_str and not final_reasoning_content_str:
+            #     message_payload['content'] = ""
+            # elif final_reasoning_content_str and not final_normal_content_str:
+            #     message_payload['content'] = None
+            # else: # final_normal_content_str has content
+            #     message_payload['content'] = final_normal_content_str
+            
+            # Simplified logic for content: always include it. If it was empty, it'll be empty string.
+            # If only reasoning was present, content will be empty string.
+            message_payload['content'] = final_normal_content_str
+
 
             choices.append({
                 "index": i,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop"
+                "message": message_payload,
+                "finish_reason": "stop" # Assuming "stop" as Gemini doesn't always map directly
             })
+            
+    # This elif handles cases where gemini_response itself might be a simple text response
     elif hasattr(gemini_response, 'text'):
-         content = gemini_response.text or "" # Coalesce None to empty string
+         content_str = gemini_response.text or ""
          if is_encrypt_full:
-             content = deobfuscate_text(content) # deobfuscate_text should also be robust to empty string
+             content_str = deobfuscate_text(content_str)
          choices.append({
              "index": 0,
-             "message": {"role": "assistant", "content": content},
+             "message": {"role": "assistant", "content": content_str},
              "finish_reason": "stop"
          })
-    else:
+    else: # Fallback for empty or unexpected response structure
          choices.append({
              "index": 0,
-             "message": {"role": "assistant", "content": ""},
+             "message": {"role": "assistant", "content": ""}, # Ensure content key
              "finish_reason": "stop"
          })
 
@@ -395,32 +438,49 @@ def convert_to_openai_format(gemini_response, model: str) -> Dict[str, Any]:
 def convert_chunk_to_openai(chunk, model: str, response_id: str, candidate_index: int = 0) -> str:
     """Converts Gemini stream chunk to OpenAI format, applying deobfuscation if needed."""
     is_encrypt_full = model.endswith("-encrypt-full")
-    chunk_content_str = "" # Renamed for clarity and to ensure it's always a string
+    
+    # This is original_chunk.candidates[0].content after your reassignment
+    gemini_content_part = chunk.candidates[0].content
 
+    reasoning_text_parts = []
+    normal_text_parts = []
+    
     try:
-        if hasattr(chunk, 'parts') and chunk.parts:
-            current_parts_texts = []
-            for part_item in chunk.parts:
-                # Ensure part_item.text exists, is not None, and convert to string
+        if hasattr(gemini_content_part, 'parts') and gemini_content_part.parts:
+            for part_item in gemini_content_part.parts:
+                part_text = ""
                 if hasattr(part_item, 'text') and part_item.text is not None:
-                    current_parts_texts.append(str(part_item.text))
-            chunk_content_str = "".join(current_parts_texts)
-        elif hasattr(chunk, 'text') and chunk.text is not None:
-            # Ensure chunk.text is converted to string if it's not None
-            chunk_content_str = str(chunk.text)
-        # If chunk has neither .parts nor .text, or if .text is None, chunk_content_str remains ""
+                    part_text = str(part_item.text)
+
+                # Check for the 'thought' attribute on the part_item itself and append directly
+                if hasattr(part_item, 'thought') and part_item.thought is True: # Corrected to 'thought'
+                    reasoning_text_parts.append(part_text)
+                else:
+                    normal_text_parts.append(part_text)
+        elif hasattr(gemini_content_part, 'text') and gemini_content_part.text is not None:
+            # If no 'parts', but 'text' exists, it's normal content
+            normal_text_parts.append(str(gemini_content_part.text))
+        # If gemini_content_part has neither .parts nor .text, or if .text is None, both lists remain empty
     except Exception as e_chunk_extract:
-        # Log the error and the problematic chunk structure
-        print(f"WARNING: Error extracting content from chunk in convert_chunk_to_openai: {e_chunk_extract}. Chunk type: {type(chunk)}. Chunk data: {str(chunk)[:200]}")
-        chunk_content_str = "" # Default to empty string in case of any error
+        print(f"WARNING: Error extracting content from Gemini content part in convert_chunk_to_openai: {e_chunk_extract}. Content part type: {type(gemini_content_part)}. Data: {str(gemini_content_part)[:200]}")
+        # Fallback to empty if extraction fails, lists will remain empty
+
+    final_reasoning_content_str = "".join(reasoning_text_parts)
+    final_normal_content_str = "".join(normal_text_parts)
 
     if is_encrypt_full:
-        chunk_content_str = deobfuscate_text(chunk_content_str) # deobfuscate_text should handle empty string
+        final_reasoning_content_str = deobfuscate_text(final_reasoning_content_str)
+        final_normal_content_str = deobfuscate_text(final_normal_content_str)
 
-    if is_encrypt_full:
-        chunk_content = deobfuscate_text(chunk_content)
+    # Construct delta payload
+    delta_payload = {}
+    if final_reasoning_content_str: # Only add if there's content
+        delta_payload['reasoning_content'] = final_reasoning_content_str
+    if final_normal_content_str: # Only add if there's content
+        delta_payload['content'] = final_normal_content_str
+    # If both are empty, delta_payload will be an empty dict {}, which is valid for OpenAI stream (empty update)
 
-    finish_reason = None 
+    finish_reason = None
     # Actual finish reason handling would be more complex if Gemini provides it mid-stream
 
     chunk_data = {
@@ -431,13 +491,16 @@ def convert_chunk_to_openai(chunk, model: str, response_id: str, candidate_index
         "choices": [
             {
                 "index": candidate_index,
-                "delta": {**({"content": chunk_content_str} if chunk_content_str else {})},
+                "delta": delta_payload, # Use the new delta_payload
                 "finish_reason": finish_reason
             }
         ]
     }
-    if hasattr(chunk, 'logprobs'):
-         chunk_data["choices"][0]["logprobs"] = getattr(chunk, 'logprobs', None)
+    # Note: The original 'chunk' variable in the broader scope was the full Gemini GenerateContentResponse chunk.
+    # The 'logprobs' would be on the candidate, not on gemini_content_part.
+    # We need to access logprobs from the original chunk's candidate.
+    if hasattr(chunk, 'candidates') and chunk.candidates and hasattr(chunk.candidates[0], 'logprobs'):
+         chunk_data["choices"][0]["logprobs"] = getattr(chunk.candidates[0], 'logprobs', None)
     return f"data: {json.dumps(chunk_data)}\n\n"
 
 def create_final_chunk(model: str, response_id: str, candidate_count: int = 1) -> str:

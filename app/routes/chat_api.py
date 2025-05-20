@@ -228,16 +228,42 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                         )
                         async for chunk in stream_response:
                             try:
-                                yield f"data: {chunk.model_dump_json()}\n\n"
-                            except Exception as chunk_serialization_error:
-                                error_msg_chunk = f"Error serializing OpenAI chunk for {request.model}: {str(chunk_serialization_error)}. Chunk: {str(chunk)[:200]}"
+                                chunk_as_dict = chunk.model_dump(exclude_unset=True, exclude_none=True)
+                                print(chunk_as_dict)
+                                
+                                # Safely navigate and check for thought flag
+                                choices = chunk_as_dict.get('choices')
+                                if choices and isinstance(choices, list) and len(choices) > 0:
+                                    delta = choices[0].get('delta')
+                                    if delta and isinstance(delta, dict):
+                                        extra_content = delta.get('extra_content')
+                                        if isinstance(extra_content, dict):
+                                            google_content = extra_content.get('google')
+                                            if isinstance(google_content, dict) and google_content.get('thought') is True:
+                                                # This is a thought chunk, modify chunk_as_dict's delta in place
+                                                reasoning_text = delta.get('content')
+                                                if reasoning_text is not None:
+                                                    delta['reasoning_content'] = reasoning_text
+                                                
+                                                if 'content' in delta:
+                                                    del delta['content']
+                                                
+                                                # Always delete extra_content for thought chunks
+                                                if 'extra_content' in delta:
+                                                    del delta['extra_content']
+                                
+                                # Yield the (potentially modified) dictionary as JSON
+                                yield f"data: {json.dumps(chunk_as_dict)}\n\n"
+
+                            except Exception as chunk_processing_error: # Catch errors from dict manipulation or json.dumps
+                                error_msg_chunk = f"Error processing or serializing OpenAI chunk for {request.model}: {str(chunk_processing_error)}. Chunk: {str(chunk)[:200]}"
                                 print(f"ERROR: {error_msg_chunk}")
                                 # Truncate
                                 if len(error_msg_chunk) > 1024:
                                     error_msg_chunk = error_msg_chunk[:1024] + "..."
                                 error_response_chunk = create_openai_error_response(500, error_msg_chunk, "server_error")
-                                json_payload_for_chunk_error = json.dumps(error_response_chunk)
-                                print(f"DEBUG: Yielding chunk serialization error JSON payload (OpenAI path): {json_payload_for_chunk_error}")
+                                json_payload_for_chunk_error = json.dumps(error_response_chunk) # Ensure json is imported
+                                print(f"DEBUG: Yielding chunk processing error JSON payload (OpenAI path): {json_payload_for_chunk_error}")
                                 yield f"data: {json_payload_for_chunk_error}\n\n"
                                 yield "data: [DONE]\n\n"
                                 return # Stop further processing for this request
@@ -263,7 +289,41 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                         **openai_params,
                         extra_body=openai_extra_body
                     )
-                    return JSONResponse(content=response.model_dump(exclude_unset=True))
+                    response_dict = response.model_dump(exclude_unset=True, exclude_none=True)
+
+                    # Process reasoning_tokens for non-streaming response
+                    try:
+                        usage = response_dict.get('usage')
+                        if usage and isinstance(usage, dict):
+                            completion_details = usage.get('completion_tokens_details')
+                            if completion_details and isinstance(completion_details, dict):
+                                num_reasoning_tokens = completion_details.get('reasoning_tokens')
+                                
+                                if isinstance(num_reasoning_tokens, int) and num_reasoning_tokens > 0:
+                                    choices = response_dict.get('choices')
+                                    if choices and isinstance(choices, list) and len(choices) > 0:
+                                        # Ensure choices[0] and message are dicts, model_dump makes them so
+                                        message_dict = choices[0].get('message')
+                                        if message_dict and isinstance(message_dict, dict):
+                                            full_content = message_dict.get('content')
+                                            if isinstance(full_content, str): # Ensure content is a string
+                                                reasoning_text = full_content[:num_reasoning_tokens]
+                                                actual_content = full_content[num_reasoning_tokens:]
+                                                
+                                                message_dict['reasoning_content'] = reasoning_text
+                                                message_dict['content'] = actual_content
+                                                
+                                                # Clean up Vertex-specific field
+                                                del completion_details['reasoning_tokens']
+                                                if not completion_details: # If dict is now empty
+                                                    del usage['completion_tokens_details']
+                                                if not usage: # If dict is now empty
+                                                    del response_dict['usage']
+                    except Exception as e_non_stream_reasoning:
+                        print(f"WARNING: Could not process non-streaming reasoning tokens for model {request.model}: {e_non_stream_reasoning}. Response will be returned as is from Vertex.")
+                        # Fallthrough to return response_dict as is if processing fails
+
+                    return JSONResponse(content=response_dict)
                 except Exception as generate_error:
                     error_msg_generate = f"Error calling OpenAI client for {request.model}: {str(generate_error)}"
                     print(f"ERROR: {error_msg_generate}")
