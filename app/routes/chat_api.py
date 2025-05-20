@@ -253,6 +253,7 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                                                     del delta['extra_content']
                                 
                                 # Yield the (potentially modified) dictionary as JSON
+                                print(chunk_as_dict)
                                 yield f"data: {json.dumps(chunk_as_dict)}\n\n"
 
                             except Exception as chunk_processing_error: # Catch errors from dict manipulation or json.dumps
