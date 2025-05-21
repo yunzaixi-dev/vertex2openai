@@ -22,12 +22,14 @@ from model_loader import get_vertex_models, get_vertex_express_models # Import f
 from message_processing import (
     create_gemini_prompt,
     create_encrypted_gemini_prompt,
-    create_encrypted_full_gemini_prompt
+    create_encrypted_full_gemini_prompt,
+    split_text_by_completion_tokens # Added
 )
 from api_helpers import (
     create_generation_config,
     create_openai_error_response,
-    execute_gemini_call
+    execute_gemini_call,
+    openai_fake_stream_generator # Added
 )
 
 router = APIRouter()
@@ -222,72 +224,83 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
             }
 
             if request.stream:
-                async def openai_stream_generator():
-                    try:
-                        stream_response = await openai_client.chat.completions.create(
-                            **openai_params,
-                            extra_body=openai_extra_body
-                        )
-                        async for chunk in stream_response:
-                            try:
-                                chunk_as_dict = chunk.model_dump(exclude_unset=True, exclude_none=True)
-                                
-                                # Safely navigate and check for thought flag
-                                choices = chunk_as_dict.get('choices')
-                                if choices and isinstance(choices, list) and len(choices) > 0:
-                                    delta = choices[0].get('delta')
-                                    if delta and isinstance(delta, dict):
-                                        extra_content = delta.get('extra_content')
-                                        if isinstance(extra_content, dict):
-                                            google_content = extra_content.get('google')
-                                            if isinstance(google_content, dict) and google_content.get('thought') is True:
-                                                # This is a thought chunk, modify chunk_as_dict's delta in place
-                                                reasoning_text = delta.get('content')
-                                                if reasoning_text is not None:
-                                                    delta['reasoning_content'] = reasoning_text
-                                                
-                                                if 'content' in delta:
-                                                    del delta['content']
-                                                
-                                                # Always delete extra_content for thought chunks
-                                                if 'extra_content' in delta:
-                                                    del delta['extra_content']
-                                
-                                # Yield the (potentially modified) dictionary as JSON
-                                print(chunk_as_dict)
-                                yield f"data: {json.dumps(chunk_as_dict)}\n\n"
+                if app_config.FAKE_STREAMING_ENABLED:
+                    print(f"INFO: OpenAI Fake Streaming (SSE Simulation) ENABLED for model '{request.model}'.")
+                    # openai_params already has "stream": True from initial setup,
+                    # but openai_fake_stream_generator will make a stream=False call internally.
+                    # Call the now async generator
+                    return StreamingResponse(
+                        await openai_fake_stream_generator( # Added await
+                            openai_client=openai_client,
+                            openai_params=openai_params,
+                            openai_extra_body=openai_extra_body,
+                            request_obj=request,
+                            is_auto_attempt=False,
+                            # --- New parameters for tokenizer and reasoning split ---
+                            gcp_credentials=rotated_credentials,
+                            gcp_project_id=PROJECT_ID, # This is rotated_project_id
+                            gcp_location=LOCATION,     # This is "global"
+                            base_model_id_for_tokenizer=base_model_name # Stripped model ID for tokenizer
+                        ),
+                        media_type="text/event-stream"
+                    )
+                else: # Regular OpenAI streaming
+                    print(f"INFO: OpenAI True Streaming ENABLED for model '{request.model}'.")
+                    async def openai_true_stream_generator(): # Renamed to avoid conflict
+                        try:
+                            # Ensure stream=True is explicitly passed for real streaming
+                            openai_params_for_true_stream = {**openai_params, "stream": True}
+                            stream_response = await openai_client.chat.completions.create(
+                                **openai_params_for_true_stream,
+                                extra_body=openai_extra_body
+                            )
+                            async for chunk in stream_response:
+                                try:
+                                    chunk_as_dict = chunk.model_dump(exclude_unset=True, exclude_none=True)
+                                    
+                                    choices = chunk_as_dict.get('choices')
+                                    if choices and isinstance(choices, list) and len(choices) > 0:
+                                        delta = choices[0].get('delta')
+                                        if delta and isinstance(delta, dict):
+                                            extra_content = delta.get('extra_content')
+                                            if isinstance(extra_content, dict):
+                                                google_content = extra_content.get('google')
+                                                if isinstance(google_content, dict) and google_content.get('thought') is True:
+                                                    reasoning_text = delta.get('content')
+                                                    if reasoning_text is not None:
+                                                        delta['reasoning_content'] = reasoning_text
+                                                    if 'content' in delta: del delta['content']
+                                                    if 'extra_content' in delta: del delta['extra_content']
+                                    
+                                    # print(f"DEBUG OpenAI Stream Chunk: {chunk_as_dict}") # Potential verbose log
+                                    yield f"data: {json.dumps(chunk_as_dict)}\n\n"
 
-                            except Exception as chunk_processing_error: # Catch errors from dict manipulation or json.dumps
-                                error_msg_chunk = f"Error processing or serializing OpenAI chunk for {request.model}: {str(chunk_processing_error)}. Chunk: {str(chunk)[:200]}"
-                                print(f"ERROR: {error_msg_chunk}")
-                                # Truncate
-                                if len(error_msg_chunk) > 1024:
-                                    error_msg_chunk = error_msg_chunk[:1024] + "..."
-                                error_response_chunk = create_openai_error_response(500, error_msg_chunk, "server_error")
-                                json_payload_for_chunk_error = json.dumps(error_response_chunk) # Ensure json is imported
-                                print(f"DEBUG: Yielding chunk processing error JSON payload (OpenAI path): {json_payload_for_chunk_error}")
-                                yield f"data: {json_payload_for_chunk_error}\n\n"
-                                yield "data: [DONE]\n\n"
-                                return # Stop further processing for this request
-                        yield "data: [DONE]\n\n"
-                    except Exception as stream_error:
-                        original_error_message = str(stream_error)
-                        # Truncate very long error messages
-                        if len(original_error_message) > 1024:
-                            original_error_message = original_error_message[:1024] + "..."
-                        
-                        error_msg_stream = f"Error during OpenAI client streaming for {request.model}: {original_error_message}"
-                        print(f"ERROR: {error_msg_stream}")
-                        
-                        error_response_content = create_openai_error_response(500, error_msg_stream, "server_error")
-                        json_payload_for_stream_error = json.dumps(error_response_content)
-                        print(f"DEBUG: Yielding stream error JSON payload (OpenAI path): {json_payload_for_stream_error}")
-                        yield f"data: {json_payload_for_stream_error}\n\n"
-                        yield "data: [DONE]\n\n"
-                return StreamingResponse(openai_stream_generator(), media_type="text/event-stream")
-            else: # Not streaming
+                                except Exception as chunk_processing_error:
+                                    error_msg_chunk = f"Error processing/serializing OpenAI chunk for {request.model}: {str(chunk_processing_error)}. Chunk: {str(chunk)[:200]}"
+                                    print(f"ERROR: {error_msg_chunk}")
+                                    if len(error_msg_chunk) > 1024: error_msg_chunk = error_msg_chunk[:1024] + "..."
+                                    error_response_chunk = create_openai_error_response(500, error_msg_chunk, "server_error")
+                                    json_payload_for_chunk_error = json.dumps(error_response_chunk)
+                                    yield f"data: {json_payload_for_chunk_error}\n\n"
+                                    yield "data: [DONE]\n\n"
+                                    return
+                            yield "data: [DONE]\n\n"
+                        except Exception as stream_error:
+                            original_error_message = str(stream_error)
+                            if len(original_error_message) > 1024: original_error_message = original_error_message[:1024] + "..."
+                            error_msg_stream = f"Error during OpenAI client true streaming for {request.model}: {original_error_message}"
+                            print(f"ERROR: {error_msg_stream}")
+                            error_response_content = create_openai_error_response(500, error_msg_stream, "server_error")
+                            json_payload_for_stream_error = json.dumps(error_response_content)
+                            yield f"data: {json_payload_for_stream_error}\n\n"
+                            yield "data: [DONE]\n\n"
+                    return StreamingResponse(openai_true_stream_generator(), media_type="text/event-stream")
+            else: # Not streaming (is_openai_direct_model and not request.stream)
                 try:
+                    # Ensure stream=False is explicitly passed for non-streaming
+                    openai_params_for_non_stream = {**openai_params, "stream": False}
                     response = await openai_client.chat.completions.create(
+                        **openai_params_for_non_stream,
                         **openai_params,
                         extra_body=openai_extra_body
                     )
@@ -312,55 +325,19 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                                 if isinstance(vertex_completion_tokens, int) and vertex_completion_tokens > 0:
                                     full_content = message_dict.get('content')
                                     if isinstance(full_content, str) and full_content:
-                                        
-                                        def _get_token_strings_and_split_texts_sync(creds, proj_id, loc, model_id_for_tokenizer, text_to_tokenize, num_completion_tokens_from_usage):
-                                            sync_tokenizer_client = genai.Client(
-                                                vertexai=True, credentials=creds, project=proj_id, location=loc,
-                                                http_options=HttpOptions(api_version="v1")
-                                            )
-                                            if not text_to_tokenize: return "", text_to_tokenize, [] # No reasoning, original content, empty token list
-
-                                            token_compute_response = sync_tokenizer_client.models.compute_tokens(
-                                                model=model_id_for_tokenizer, contents=text_to_tokenize
-                                            )
-                                            
-                                            all_final_token_strings = []
-                                            if token_compute_response.tokens_info:
-                                                for token_info_item in token_compute_response.tokens_info:
-                                                    for api_token_bytes in token_info_item.tokens:
-                                                        intermediate_str = api_token_bytes.decode('utf-8', errors='replace')
-                                                        final_token_text = ""
-                                                        try:
-                                                            b64_decoded_bytes = base64.b64decode(intermediate_str)
-                                                            final_token_text = b64_decoded_bytes.decode('utf-8', errors='replace')
-                                                        except Exception:
-                                                            final_token_text = intermediate_str
-                                                        all_final_token_strings.append(final_token_text)
-                                            
-                                            if not all_final_token_strings: # Should not happen if text_to_tokenize is not empty
-                                                return "", text_to_tokenize, []
-
-                                            if not (0 < num_completion_tokens_from_usage <= len(all_final_token_strings)):
-                                                print(f"WARNING_TOKEN_SPLIT: num_completion_tokens_from_usage ({num_completion_tokens_from_usage}) is invalid for total client-tokenized tokens ({len(all_final_token_strings)}). Returning full content as 'content'.")
-                                                return "", "".join(all_final_token_strings), all_final_token_strings
-
-                                            completion_part_tokens = all_final_token_strings[-num_completion_tokens_from_usage:]
-                                            reasoning_part_tokens = all_final_token_strings[:-num_completion_tokens_from_usage]
-                                            
-                                            reasoning_output_str = "".join(reasoning_part_tokens)
-                                            completion_output_str = "".join(completion_part_tokens)
-                                            
-                                            return reasoning_output_str, completion_output_str, all_final_token_strings
-
                                         model_id_for_tokenizer = base_model_name
                                         
                                         reasoning_text, actual_content, dbg_all_tokens = await asyncio.to_thread(
-                                            _get_token_strings_and_split_texts_sync,
-                                            rotated_credentials, PROJECT_ID, LOCATION,
-                                            model_id_for_tokenizer, full_content, vertex_completion_tokens
+                                            split_text_by_completion_tokens, # Use imported function
+                                            rotated_credentials,
+                                            PROJECT_ID,
+                                            LOCATION,
+                                            model_id_for_tokenizer,
+                                            full_content,
+                                            vertex_completion_tokens
                                         )
 
-                                        message_dict['content'] = actual_content # Set the new content (potentially from joined tokens)
+                                        message_dict['content'] = actual_content
                                         if reasoning_text: # Only add reasoning_content if it's not empty
                                             message_dict['reasoning_content'] = reasoning_text
                                             print(f"DEBUG_REASONING_SPLIT_DIRECT_JOIN: Successful. Reasoning len: {len(reasoning_text)}. Content len: {len(actual_content)}")

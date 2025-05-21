@@ -3,10 +3,12 @@ import re
 import json
 import time
 import urllib.parse
-from typing import List, Dict, Any, Union, Literal # Optional removed
+from typing import List, Dict, Any, Union, Literal
 
 from google.genai import types
-from models import OpenAIMessage, ContentPartText, ContentPartImage # Changed from relative
+from google.genai.types import HttpOptions as GenAIHttpOptions # Renamed to avoid conflict if HttpOptions is used elsewhere
+from google import genai as google_genai_client # For instantiating client in tokenizer
+from models import OpenAIMessage, ContentPartText, ContentPartImage
 
 # Define supported roles for Gemini API
 SUPPORTED_ROLES = ["user", "model"]
@@ -520,3 +522,93 @@ def create_final_chunk(model: str, response_id: str, candidate_count: int = 1) -
         "choices": choices
     }
     return f"data: {json.dumps(final_chunk)}\n\n"
+
+def split_text_by_completion_tokens(
+    gcp_creds: Any,
+    gcp_proj_id: str,
+    gcp_loc: str,
+    model_id_for_tokenizer: str,
+    full_text_to_tokenize: str,
+    num_completion_tokens_from_usage: int
+) -> tuple[str, str, List[str]]:
+    """
+    Splits a given text into reasoning and actual content based on a number of completion tokens.
+    Uses Google's tokenizer. This is a synchronous function.
+    Args:
+        gcp_creds: GCP credentials.
+        gcp_proj_id: GCP project ID.
+        gcp_loc: GCP location.
+        model_id_for_tokenizer: The base model ID (e.g., "gemini-1.5-pro") for the tokenizer.
+        full_text_to_tokenize: The full text string from the LLM.
+        num_completion_tokens_from_usage: The number of tokens designated as 'completion' by the LLM's usage stats.
+    Returns:
+        A tuple: (reasoning_text_str, actual_content_text_str, all_decoded_token_strings_list)
+    """
+    if not full_text_to_tokenize: # Handle empty input early
+        return "", "", []
+
+    try:
+        # This client is specifically for tokenization. Uses GenAIHttpOptions for api_version.
+        sync_tokenizer_client = google_genai_client.Client(
+            vertexai=True, credentials=gcp_creds, project=gcp_proj_id, location=gcp_loc,
+            http_options=GenAIHttpOptions(api_version="v1") # v1 is generally for compute_tokens
+        )
+        
+        token_compute_response = sync_tokenizer_client.models.compute_tokens(
+            model=model_id_for_tokenizer, contents=full_text_to_tokenize
+        )
+        
+        all_final_token_strings = []
+        if token_compute_response.tokens_info:
+            for token_info_item in token_compute_response.tokens_info:
+                for api_token_bytes in token_info_item.tokens:
+                    # Attempt to decode from base64 first, as Vertex sometimes returns b64 encoded tokens.
+                    # Fallback to direct UTF-8 decoding if b64 fails.
+                    intermediate_str = ""
+                    try:
+                        # Vertex's tokens via compute_tokens for some models are plain UTF-8 strings,
+                        # but sometimes they might be base64 encoded representations of bytes.
+                        # The provided code in chat_api.py does a b64decode on a utf-8 string.
+                        # Let's assume api_token_bytes is indeed bytes that represent a b64 string of the *actual* token bytes.
+                        # This seems overly complex based on typical SDKs, but following existing pattern.
+                        # More commonly, api_token_bytes would *be* the token bytes directly.
+                        # If api_token_bytes is already text:
+                        if isinstance(api_token_bytes, str):
+                            intermediate_str = api_token_bytes
+                        else: # Assuming it's bytes
+                             intermediate_str = api_token_bytes.decode('utf-8', errors='replace')
+                        
+                        final_token_text = ""
+                        # Attempt to decode what we think is a base64 string
+                        b64_decoded_bytes = base64.b64decode(intermediate_str)
+                        final_token_text = b64_decoded_bytes.decode('utf-8', errors='replace')
+                    except Exception:
+                        # If b64decode fails, assume intermediate_str was the actual token text
+                        final_token_text = intermediate_str
+                    all_final_token_strings.append(final_token_text)
+        
+        if not all_final_token_strings: # Should not happen if full_text_to_tokenize was not empty
+            # print(f"DEBUG_TOKEN_SPLIT: No tokens found for: '{full_text_to_tokenize[:50]}...'")
+            return "", full_text_to_tokenize, []
+
+        # Validate num_completion_tokens_from_usage
+        if not (0 < num_completion_tokens_from_usage <= len(all_final_token_strings)):
+            # print(f"WARNING_TOKEN_SPLIT: num_completion_tokens_from_usage ({num_completion_tokens_from_usage}) is invalid or out of bounds for total client-tokenized tokens ({len(all_final_token_strings)}). Full text returned as 'content'.")
+            # Return the text as re-joined by our tokenizer, not the original full_text_to_tokenize,
+            # as the tokenization process itself might subtly alter it (e.g. space handling, special chars).
+            return "", "".join(all_final_token_strings), all_final_token_strings
+
+        # Split tokens
+        completion_part_tokens = all_final_token_strings[-num_completion_tokens_from_usage:]
+        reasoning_part_tokens = all_final_token_strings[:-num_completion_tokens_from_usage]
+        
+        reasoning_output_str = "".join(reasoning_part_tokens)
+        completion_output_str = "".join(completion_part_tokens)
+        
+        # print(f"DEBUG_TOKEN_SPLIT: Reasoning: '{reasoning_output_str[:50]}...', Content: '{completion_output_str[:50]}...'")
+        return reasoning_output_str, completion_output_str, all_final_token_strings
+
+    except Exception as e_tok:
+        print(f"ERROR: Tokenizer failed in split_text_by_completion_tokens: {e_tok}")
+        # Fallback: no reasoning, original full text as content, empty token list
+        return "", full_text_to_tokenize, []
