@@ -230,7 +230,7 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                     # but openai_fake_stream_generator will make a stream=False call internally.
                     # Call the now async generator
                     return StreamingResponse(
-                        await openai_fake_stream_generator( # Added await
+                        openai_fake_stream_generator( # REMOVED await here
                             openai_client=openai_client,
                             openai_params=openai_params,
                             openai_extra_body=openai_extra_body,
