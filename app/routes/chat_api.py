@@ -302,7 +302,7 @@ STRICT OPERATING PROTOCOL:
                     openai_params_for_non_stream = {**openai_params, "stream": False}
                     response = await openai_client.chat.completions.create(
                         **openai_params_for_non_stream,
-                        **openai_params,
+                        # Removed redundant **openai_params spread
                         extra_body=openai_extra_body
                     )
                     response_dict = response.model_dump(exclude_unset=True, exclude_none=True)
