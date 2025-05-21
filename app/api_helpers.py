@@ -59,7 +59,7 @@ def is_gemini_response_valid(response: Any) -> bool:
         for candidate in response.candidates:
             if hasattr(candidate, 'text') and isinstance(candidate.text, str) and candidate.text.strip(): return True
             if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts') and candidate.content.parts:
-                for part_item in candidate.content.parts: # Renamed part to part_item
+                for part_item in candidate.content.parts: 
                     if hasattr(part_item, 'text') and isinstance(part_item.text, str) and part_item.text.strip(): return True
     return False
 
@@ -70,6 +70,7 @@ async def _base_fake_stream_engine(
     sse_model_name: str,
     is_auto_attempt: bool,
     is_valid_response_func: Callable[[Any], bool],
+    keep_alive_interval_seconds: float, # Added parameter
     process_text_func: Optional[Callable[[str, str], str]] = None,
     check_block_reason_func: Optional[Callable[[Any], None]] = None,
     reasoning_text_to_yield: Optional[str] = None,
@@ -77,10 +78,13 @@ async def _base_fake_stream_engine(
 ):
     api_call_task = api_call_task_creator()
 
-    while not api_call_task.done():
-        keep_alive_data = {"id": "chatcmpl-keepalive", "object": "chat.completion.chunk", "created": int(time.time()), "model": sse_model_name, "choices": [{"delta": {"reasoning_content": ""}, "index": 0, "finish_reason": None}]}
-        yield f"data: {json.dumps(keep_alive_data)}\n\n"
-        await asyncio.sleep(app_config.FAKE_STREAMING_INTERVAL_SECONDS)
+    # Use the passed-in keep_alive_interval_seconds
+    # Only loop for keep-alive if the interval is positive
+    if keep_alive_interval_seconds > 0:
+        while not api_call_task.done():
+            keep_alive_data = {"id": "chatcmpl-keepalive", "object": "chat.completion.chunk", "created": int(time.time()), "model": sse_model_name, "choices": [{"delta": {"reasoning_content": ""}, "index": 0, "finish_reason": None}]}
+            yield f"data: {json.dumps(keep_alive_data)}\n\n"
+            await asyncio.sleep(keep_alive_interval_seconds) 
     
     try:
         full_api_response = await api_call_task
@@ -144,7 +148,7 @@ def gemini_fake_stream_generator(
     request_obj: OpenAIRequest,
     is_auto_attempt: bool
 ):
-    model_name_for_log = getattr(gemini_client_instance, 'model_name', 'unknown_gemini_model_object') # Use a default if no model_name
+    model_name_for_log = getattr(gemini_client_instance, 'model_name', 'unknown_gemini_model_object')
     print(f"FAKE STREAMING (Gemini): Prep for '{request_obj.model}' (using API model string: '{model_for_api_call}', client object: '{model_name_for_log}')")
 
     def _create_gemini_api_task() -> asyncio.Task:
@@ -185,7 +189,7 @@ def gemini_fake_stream_generator(
         check_block_reason_func=_check_gemini_block,
         is_valid_response_func=is_gemini_response_valid, 
         response_id=response_id, sse_model_name=request_obj.model,
-        keep_alive_interval_seconds=app_config.FAKE_STREAMING_INTERVAL_SECONDS,
+        keep_alive_interval_seconds=app_config.FAKE_STREAMING_INTERVAL_SECONDS, # This call was correct
         is_auto_attempt=is_auto_attempt
     )
 
@@ -201,11 +205,10 @@ async def openai_fake_stream_generator(
     base_model_id_for_tokenizer: str 
 ):
     api_model_name = openai_params.get("model", "unknown-openai-model")
-    print(f"FAKE STREAMING (OpenAI): Prep for '{request_obj.model}' (API model: '{api_model_name}') with reasoning spli    t.")
+    print(f"FAKE STREAMING (OpenAI): Prep for '{request_obj.model}' (API model: '{api_model_name}') with reasoning split.")
     response_id = f"chatcmpl-{int(time.time())}"
     
     async def _openai_api_call_and_split_task_creator_wrapper():
-        # Ensure 'stream' is False for this specific call, overriding any 'stream': True from original openai_params
         params_for_non_stream_call = openai_params.copy()
         params_for_non_stream_call['stream'] = False
         
@@ -233,11 +236,15 @@ async def openai_fake_stream_generator(
                  print(f"DEBUG_FAKE_REASONING_SPLIT: Success. Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content_text)}")
         return raw_response, reasoning_text, actual_content_text
 
+    # The keep-alive for the combined API call + tokenization is handled here
     temp_task_for_keepalive_check = asyncio.create_task(_openai_api_call_and_split_task_creator_wrapper())
-    while not temp_task_for_keepalive_check.done():
-        keep_alive_data = {"id": "chatcmpl-keepalive", "object": "chat.completion.chunk", "created": int(time.time()), "model": request_obj.model, "choices": [{"delta": {"content": ""}, "index": 0, "finish_reason": None}]}
-        yield f"data: {json.dumps(keep_alive_data)}\n\n"
-        await asyncio.sleep(app_config.FAKE_STREAMING_INTERVAL_SECONDS)
+    # Use app_config directly for this outer keep-alive loop
+    outer_keep_alive_interval = app_config.FAKE_STREAMING_INTERVAL_SECONDS
+    if outer_keep_alive_interval > 0:
+        while not temp_task_for_keepalive_check.done():
+            keep_alive_data = {"id": "chatcmpl-keepalive", "object": "chat.completion.chunk", "created": int(time.time()), "model": request_obj.model, "choices": [{"delta": {"content": ""}, "index": 0, "finish_reason": None}]}
+            yield f"data: {json.dumps(keep_alive_data)}\n\n"
+            await asyncio.sleep(outer_keep_alive_interval)
 
     try:
         full_api_response, separated_reasoning_text, separated_actual_content_text = await temp_task_for_keepalive_check
@@ -254,7 +261,7 @@ async def openai_fake_stream_generator(
             is_valid_response_func=_is_openai_response_valid,
             response_id=response_id,
             sse_model_name=request_obj.model,
-            keep_alive_interval_seconds=0, 
+            keep_alive_interval_seconds=0, # Set to 0 as keep-alive is handled by the wrapper
             is_auto_attempt=is_auto_attempt,
             reasoning_text_to_yield=separated_reasoning_text,
             actual_content_text_to_yield=separated_actual_content_text
