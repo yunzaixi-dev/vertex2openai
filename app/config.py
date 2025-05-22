@@ -6,6 +6,10 @@ DEFAULT_PASSWORD = "123456"
 # Get password from environment variable or use default
 API_KEY = os.environ.get("API_KEY", DEFAULT_PASSWORD)
 
+# HuggingFace Authentication Settings
+HUGGINGFACE = os.environ.get("HUGGINGFACE", "false").lower() == "true"
+HUGGINGFACE_API_KEY = os.environ.get("HUGGINGFACE_API_KEY", "") # Default to empty string, auth logic will verify if HF_MODE is true and this key is needed
+
 # Directory for service account credential files
 CREDENTIALS_DIR = os.environ.get("CREDENTIALS_DIR", "/app/credentials")
 

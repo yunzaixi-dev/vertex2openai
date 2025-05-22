@@ -25,6 +25,7 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
     raw_express_models = await get_vertex_express_models()
     
     candidate_model_ids = set()
+    raw_vertex_models_set = set(raw_vertex_models)  # For checking origin during prefixing
 
     if has_express_key:
         candidate_model_ids.update(raw_express_models)
@@ -57,8 +58,12 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
     for original_model_id in sorted(list(all_model_ids)):
         current_display_prefix = ""
         # Only add PAY_PREFIX if the model is not already an EXPRESS model (which has its own prefix)
-        if not original_model_id.startswith("[EXPRESS]") and \
-           has_sa_creds and not has_express_key and EXPERIMENTAL_MARKER not in original_model_id:
+        # Apply PAY_PREFIX if SA creds are present, it's a model from raw_vertex_models,
+        # it's not experimental, and not already an EXPRESS model.
+        if has_sa_creds and \
+           original_model_id in raw_vertex_models_set and \
+           EXPERIMENTAL_MARKER not in original_model_id and \
+           not original_model_id.startswith("[EXPRESS]"):
             current_display_prefix = PAY_PREFIX
         
         base_display_id = f"{current_display_prefix}{original_model_id}"
