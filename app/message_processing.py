@@ -199,7 +199,7 @@ def parse_gemini_response_for_reasoning_and_content(gemini_response_candidate: A
     """
     reasoning_text_parts = []
     normal_text_parts = []
-
+    
     # Check if gemini_response_candidate itself resembles a part_item with 'thought'
     # This might be relevant for direct part processing in stream chunks if candidate structure is shallow
     candidate_part_text = ""
