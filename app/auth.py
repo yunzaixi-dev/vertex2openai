@@ -63,12 +63,6 @@ async def get_api_key(
             )
         elif error_in_token is None:  # JSON 'null' is Python's None
             # If error is null, auth is successful. Now check if HUGGINGFACE_API_KEY is configured.
-            if not HUGGINGFACE_API_KEY: # Check if the key is empty or not set.
-                print("Security configuration error: HUGGINGFACE_API_KEY is not configured, but HUGGINGFACE mode is active and x-ip-token is valid.")
-                raise HTTPException(
-                    status_code=500,
-                    detail="Service security configuration incomplete: HuggingFace API Key not set."
-                )
             print(f"HuggingFace authentication successful via x-ip-token (error field was null).")
             return HUGGINGFACE_API_KEY # Return the configured HUGGINGFACE_API_KEY
         else:
