@@ -66,71 +66,55 @@ def is_gemini_response_valid(response: Any) -> bool:
 
 async def _base_fake_stream_engine(
     api_call_task_creator: Callable[[], asyncio.Task],
-    extract_text_from_response_func: Callable[[Any], str], 
+    extract_text_from_response_func: Callable[[Any], str],  # May not be used if content is pre-processed
     response_id: str,
     sse_model_name: str,
     is_auto_attempt: bool,
     is_valid_response_func: Callable[[Any], bool],
-    keep_alive_interval_seconds: float, 
-    process_text_func: Optional[Callable[[str, str], str]] = None, 
-    check_block_reason_func: Optional[Callable[[Any], None]] = None,
-    reasoning_text_to_yield: Optional[str] = None,
-    actual_content_text_to_yield: Optional[str] = None
+    keep_alive_interval_seconds: float,
+    actual_content_text_to_yield: str, # Expects already combined and tagged content
+    process_text_func: Optional[Callable[[str, str], str]] = None, # For potential post-processing like deobfuscation
+    check_block_reason_func: Optional[Callable[[Any], None]] = None
 ):
-    api_call_task = api_call_task_creator()
+    api_call_task = api_call_task_creator() # This task should ideally just return the already fetched full_api_response
 
     if keep_alive_interval_seconds > 0:
-        while not api_call_task.done():
-            keep_alive_data = {"id": "chatcmpl-keepalive", "object": "chat.completion.chunk", "created": int(time.time()), "model": sse_model_name, "choices": [{"delta": {"reasoning_content": ""}, "index": 0, "finish_reason": None}]}
-            yield f"data: {json.dumps(keep_alive_data)}\n\n"
-            await asyncio.sleep(keep_alive_interval_seconds) 
-    
+        # This keep-alive runs while the initial full API call (created by the caller) is pending.
+        # The api_call_task here is usually a dummy one just holding the response.
+        # The actual waiting with keep-alive should be in the caller of _base_fake_stream_engine.
+        # For simplicity, we'll assume keep_alive_interval_seconds passed here is for the chunking phase, if any.
+        # A better design would separate the API call wait (with its keep-alive) from chunking.
+        # However, to minimize structural changes to this function now:
+        pass # Keep-alive during chunking is less common. Primary keep-alive is while waiting for full_api_response.
+
     try:
-        full_api_response = await api_call_task 
+        full_api_response = await api_call_task # If task creator is just `asyncio.sleep(0, result=response)`, this is instant.
 
         if check_block_reason_func:
-            check_block_reason_func(full_api_response) 
+            check_block_reason_func(full_api_response) # check_block_reason_func operates on the raw API response object.
 
-        if not is_valid_response_func(full_api_response): 
+        # is_valid_response_func also operates on the raw API response object.
+        if not is_valid_response_func(full_api_response):
              raise ValueError(f"Invalid/empty API response in fake stream for model {sse_model_name}: {str(full_api_response)[:200]}")
 
-        final_reasoning_text = reasoning_text_to_yield
-        final_actual_content_text = actual_content_text_to_yield
+        # Text processing (e.g., deobfuscation) applied to the fully formed text
+        content_to_chunk = actual_content_text_to_yield
+        if process_text_func:
+            content_to_chunk = process_text_func(content_to_chunk, sse_model_name)
 
-        if final_reasoning_text is None and final_actual_content_text is None:
-            extracted_full_text = extract_text_from_response_func(full_api_response)
-            if process_text_func:
-                final_actual_content_text = process_text_func(extracted_full_text, sse_model_name)
-            else:
-                final_actual_content_text = extracted_full_text
-        else:
-            if process_text_func:
-                if final_reasoning_text is not None:
-                    final_reasoning_text = process_text_func(final_reasoning_text, sse_model_name)
-                if final_actual_content_text is not None:
-                    final_actual_content_text = process_text_func(final_actual_content_text, sse_model_name)
-        
-        if final_reasoning_text: 
-            reasoning_delta_data = {
-                "id": response_id, "object": "chat.completion.chunk", "created": int(time.time()),
-                "model": sse_model_name, "choices": [{"index": 0, "delta": {"reasoning_content": final_reasoning_text}, "finish_reason": None}]
-            }
-            yield f"data: {json.dumps(reasoning_delta_data)}\n\n"
-            if final_actual_content_text: 
-                await asyncio.sleep(0.05) 
-
-        content_to_chunk = final_actual_content_text or "" 
+        content_to_chunk = content_to_chunk or "" # Ensure it's a string
         chunk_size = max(20, math.ceil(len(content_to_chunk) / 10)) if content_to_chunk else 0
-        
-        if not content_to_chunk and content_to_chunk != "": 
+
+        if not content_to_chunk and content_to_chunk != "": # Handles None or purely empty string
             empty_delta_data = {"id": response_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": sse_model_name, "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": None}]}
             yield f"data: {json.dumps(empty_delta_data)}\n\n"
-        else: 
+        else:
             for i in range(0, len(content_to_chunk), chunk_size):
                 chunk_text = content_to_chunk[i:i+chunk_size]
                 content_delta_data = {"id": response_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": sse_model_name, "choices": [{"index": 0, "delta": {"content": chunk_text}, "finish_reason": None}]}
                 yield f"data: {json.dumps(content_delta_data)}\n\n"
-                if len(content_to_chunk) > chunk_size: await asyncio.sleep(0.05)
+                if len(content_to_chunk) > chunk_size and i + chunk_size < len(content_to_chunk): # Sleep if not the last chunk and more chunks exist
+                    await asyncio.sleep(0.05) # Simulate processing delay
 
         yield create_final_chunk(sse_model_name, response_id)
         yield "data: [DONE]\n\n"
@@ -153,10 +137,11 @@ async def gemini_fake_stream_generator( # Changed to async
     prompt_for_api_call: Union[types.Content, List[types.Content]],
     gen_config_for_api_call: Dict[str, Any],
     request_obj: OpenAIRequest,
-    is_auto_attempt: bool
+    is_auto_attempt: bool,
+    thought_tag_marker: str
 ):
     model_name_for_log = getattr(gemini_client_instance, 'model_name', 'unknown_gemini_model_object')
-    print(f"FAKE STREAMING (Gemini): Prep for '{request_obj.model}' (API model string: '{model_for_api_call}', client obj: '{model_name_for_log}') with reasoning separation.")
+    print(f"FAKE STREAMING (Gemini): Prep for '{request_obj.model}' (API model string: '{model_for_api_call}', client obj: '{model_name_for_log}') with thought_tag_marker: '{thought_tag_marker}'.")
     response_id = f"chatcmpl-{int(time.time())}"
 
     # 1. Create and await the API call task
@@ -172,33 +157,34 @@ async def gemini_fake_stream_generator( # Changed to async
     outer_keep_alive_interval = app_config.FAKE_STREAMING_INTERVAL_SECONDS
     if outer_keep_alive_interval > 0:
         while not api_call_task.done():
-            keep_alive_data = {"id": "chatcmpl-keepalive", "object": "chat.completion.chunk", "created": int(time.time()), "model": request_obj.model, "choices": [{"delta": {"reasoning_content": ""}, "index": 0, "finish_reason": None}]}
+            keep_alive_data = {"id": "chatcmpl-keepalive", "object": "chat.completion.chunk", "created": int(time.time()), "model": request_obj.model, "choices": [{"delta": {"content": ""}, "index": 0, "finish_reason": None}]} # Changed reasoning_content to content
             yield f"data: {json.dumps(keep_alive_data)}\n\n"
             await asyncio.sleep(outer_keep_alive_interval)
     
     try:
-        raw_response = await api_call_task # Get the full Gemini response
+        raw_response = await api_call_task
 
-        # 2. Parse the response for reasoning and content using the centralized parser
         separated_reasoning_text = ""
         separated_actual_content_text = ""
         if hasattr(raw_response, 'candidates') and raw_response.candidates:
-            # Typically, fake streaming would focus on the first candidate
             separated_reasoning_text, separated_actual_content_text = parse_gemini_response_for_reasoning_and_content(raw_response.candidates[0])
-        elif hasattr(raw_response, 'text') and raw_response.text is not None: # Fallback for simpler response structures
+        elif hasattr(raw_response, 'text') and raw_response.text is not None:
              separated_actual_content_text = raw_response.text
+        
+        # Combine reasoning and actual content with the tag
+        final_text_to_stream = separated_actual_content_text
+        if separated_reasoning_text and thought_tag_marker:
+            final_text_to_stream = f"<{thought_tag_marker}>{separated_reasoning_text}</{thought_tag_marker}>{separated_actual_content_text}"
+            print(f"DEBUG_GEMINI_FAKE_STREAM_TAGGED: Reasoning tagged and prepended. Tag: {thought_tag_marker}")
 
-
-        # 3. Define a text processing function (e.g., for deobfuscation)
         def _process_gemini_text_if_needed(text: str, model_name: str) -> str:
-            if model_name.endswith("-encrypt-full"):
+            if model_name.endswith("-encrypt-full"): # This processing (deobfuscate) should apply to the combined text
                 return deobfuscate_text(text)
             return text
 
-        final_reasoning_text = _process_gemini_text_if_needed(separated_reasoning_text, request_obj.model)
-        final_actual_content_text = _process_gemini_text_if_needed(separated_actual_content_text, request_obj.model)
+        # process_text_func (deobfuscation) will be applied by _base_fake_stream_engine
+        # to the final_text_to_stream.
 
-        # Define block checking for the raw response
         def _check_gemini_block_wrapper(response_to_check: Any):
             if hasattr(response_to_check, 'prompt_feedback') and hasattr(response_to_check.prompt_feedback, 'block_reason') and response_to_check.prompt_feedback.block_reason:
                 block_message = f"Response blocked by Gemini safety filter: {response_to_check.prompt_feedback.block_reason}"
@@ -206,19 +192,17 @@ async def gemini_fake_stream_generator( # Changed to async
                     block_message += f" (Message: {response_to_check.prompt_feedback.block_reason_message})"
                 raise ValueError(block_message)
 
-        # Call _base_fake_stream_engine with pre-split and processed texts
         async for chunk in _base_fake_stream_engine(
-            api_call_task_creator=lambda: asyncio.create_task(asyncio.sleep(0, result=raw_response)), # Dummy task
-            extract_text_from_response_func=lambda r: "", # Not directly used as text is pre-split
-            is_valid_response_func=is_gemini_response_valid, # Validates raw_response
-            check_block_reason_func=_check_gemini_block_wrapper, # Checks raw_response
-            process_text_func=None, # Text processing already done above
-            response_id=response_id, 
+            api_call_task_creator=lambda: asyncio.create_task(asyncio.sleep(0, result=raw_response)),
+            extract_text_from_response_func=lambda r: "", # Not used as content is pre-formed
+            is_valid_response_func=is_gemini_response_valid,
+            check_block_reason_func=_check_gemini_block_wrapper,
+            process_text_func=_process_gemini_text_if_needed, # Pass deobfuscation for _base_fake_stream_engine to apply
+            response_id=response_id,
             sse_model_name=request_obj.model,
-            keep_alive_interval_seconds=0, # Keep-alive for this inner call is 0
+            keep_alive_interval_seconds=0,
             is_auto_attempt=is_auto_attempt,
-            reasoning_text_to_yield=final_reasoning_text,
-            actual_content_text_to_yield=final_actual_content_text
+            actual_content_text_to_yield=final_text_to_stream # Pass the combined and tagged text
         ):
             yield chunk
 
@@ -244,10 +228,11 @@ async def openai_fake_stream_generator(
     gcp_credentials: Any, 
     gcp_project_id: str, 
     gcp_location: str,
-    base_model_id_for_tokenizer: str 
+    base_model_id_for_tokenizer: str,
+    thought_tag_marker: str
 ):
     api_model_name = openai_params.get("model", "unknown-openai-model")
-    print(f"FAKE STREAMING (OpenAI): Prep for '{request_obj.model}' (API model: '{api_model_name}') with reasoning split.")
+    print(f"FAKE STREAMING (OpenAI): Prep for '{request_obj.model}' (API model: '{api_model_name}') with thought_tag_marker: '{thought_tag_marker}'.")
     response_id = f"chatcmpl-{int(time.time())}"
     
     async def _openai_api_call_and_split_task_creator_wrapper():
@@ -282,33 +267,37 @@ async def openai_fake_stream_generator(
     outer_keep_alive_interval = app_config.FAKE_STREAMING_INTERVAL_SECONDS
     if outer_keep_alive_interval > 0:
         while not temp_task_for_keepalive_check.done():
-            keep_alive_data = {"id": "chatcmpl-keepalive", "object": "chat.completion.chunk", "created": int(time.time()), "model": request_obj.model, "choices": [{"delta": {"content": ""}, "index": 0, "finish_reason": None}]}
+            keep_alive_data = {"id": "chatcmpl-keepalive", "object": "chat.completion.chunk", "created": int(time.time()), "model": request_obj.model, "choices": [{"delta": {"content": ""}, "index": 0, "finish_reason": None}]} # Keep-alive has empty content
             yield f"data: {json.dumps(keep_alive_data)}\n\n"
             await asyncio.sleep(outer_keep_alive_interval)
 
     try:
         full_api_response, separated_reasoning_text, separated_actual_content_text = await temp_task_for_keepalive_check
-        def _extract_openai_full_text(response: Any) -> str: 
-            if response.choices and response.choices[0].message and response.choices[0].message.content is not None:
-                return response.choices[0].message.content
-            return ""
-        def _is_openai_response_valid(response: Any) -> bool:
+        
+        # Combine reasoning and actual content with the tag
+        final_text_to_stream = separated_actual_content_text
+        if separated_reasoning_text and thought_tag_marker:
+            final_text_to_stream = f"<{thought_tag_marker}>{separated_reasoning_text}</{thought_tag_marker}>{separated_actual_content_text}"
+            print(f"DEBUG_OPENAI_FAKE_STREAM_TAGGED: Reasoning tagged and prepended. Tag: {thought_tag_marker}")
+
+        def _is_openai_response_valid(response: Any) -> bool: # full_api_response is the raw one
             return bool(response.choices and response.choices[0].message is not None)
 
         async for chunk in _base_fake_stream_engine(
-            api_call_task_creator=lambda: asyncio.create_task(asyncio.sleep(0, result=full_api_response)), 
-            extract_text_from_response_func=_extract_openai_full_text, 
+            api_call_task_creator=lambda: asyncio.create_task(asyncio.sleep(0, result=full_api_response)),
+            extract_text_from_response_func=lambda r: "", # Not used, content is pre-formed
             is_valid_response_func=_is_openai_response_valid,
+            # No specific block checking for OpenAI direct path currently, relies on API errors.
+            # No specific process_text_func like deobfuscation defined for OpenAI direct path.
             response_id=response_id,
             sse_model_name=request_obj.model,
-            keep_alive_interval_seconds=0, 
+            keep_alive_interval_seconds=0,
             is_auto_attempt=is_auto_attempt,
-            reasoning_text_to_yield=separated_reasoning_text,
-            actual_content_text_to_yield=separated_actual_content_text
+            actual_content_text_to_yield=final_text_to_stream # Pass the combined and tagged text
         ):
             yield chunk
             
-    except Exception as e_outer: 
+    except Exception as e_outer:
         err_msg_detail = f"Error in openai_fake_stream_generator outer (model: '{request_obj.model}'): {type(e_outer).__name__} - {str(e_outer)}"
         print(f"ERROR: {err_msg_detail}")
         sse_err_msg_display = str(e_outer)
@@ -323,25 +312,27 @@ async def execute_gemini_call(
     current_client: Any, 
     model_to_call: str,  
     prompt_func: Callable[[List[OpenAIMessage]], Union[types.Content, List[types.Content]]], 
-    gen_config_for_call: Dict[str, Any], 
-    request_obj: OpenAIRequest, 
+    gen_config_for_call: Dict[str, Any],
+    request_obj: OpenAIRequest,
+    thought_tag_marker: str, # Added
     is_auto_attempt: bool = False
 ):
     actual_prompt_for_call = prompt_func(request_obj.messages)
     client_model_name_for_log = getattr(current_client, 'model_name', 'unknown_direct_client_object')
-    print(f"INFO: execute_gemini_call for requested API model '{model_to_call}', using client object with internal name '{client_model_name_for_log}'. Original request model: '{request_obj.model}'")
+    print(f"INFO: execute_gemini_call for requested API model '{model_to_call}', client obj '{client_model_name_for_log}'. Original request model: '{request_obj.model}', thought_tag_marker: '{thought_tag_marker}'")
 
     if request_obj.stream:
         if app_config.FAKE_STREAMING_ENABLED:
             return StreamingResponse(
                 gemini_fake_stream_generator( 
                     current_client, 
-                    model_to_call, 
-                    actual_prompt_for_call, 
-                    gen_config_for_call, 
-                    request_obj, 
-                    is_auto_attempt
-                ), 
+                    model_to_call,
+                    actual_prompt_for_call,
+                    gen_config_for_call,
+                    request_obj,
+                    is_auto_attempt,
+                    thought_tag_marker # Pass to gemini_fake_stream_generator
+                ),
                 media_type="text/event-stream"
             )
         
@@ -381,6 +372,8 @@ async def execute_gemini_call(
                 block_msg+=f" ({response_obj_call.prompt_feedback.block_reason_message})"
             raise ValueError(block_msg)
         
-        if not is_gemini_response_valid(response_obj_call): 
+        if not is_gemini_response_valid(response_obj_call):
             raise ValueError(f"Invalid non-streaming Gemini response for model string '{model_to_call}'. Resp: {str(response_obj_call)[:200]}")
-        return JSONResponse(content=convert_to_openai_format(response_obj_call, request_obj.model))
+        # For non-streaming Gemini, convert_to_openai_format needs to handle the tagging
+        # This will be addressed by modifying convert_to_openai_format in message_processing.py
+        return JSONResponse(content=convert_to_openai_format(response_obj_call, request_obj.model, thought_tag_marker))

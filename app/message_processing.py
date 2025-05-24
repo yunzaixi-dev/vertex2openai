@@ -240,21 +240,58 @@ def parse_gemini_response_for_reasoning_and_content(gemini_response_candidate: A
     return "".join(reasoning_text_parts), "".join(normal_text_parts)
 
 
-def convert_to_openai_format(gemini_response: Any, model: str) -> Dict[str, Any]:
+def convert_to_openai_format(gemini_response: Any, model: str, thought_tag_marker: str = "vertex_think_tag") -> Dict[str, Any]:
     is_encrypt_full = model.endswith("-encrypt-full")
     choices = []
 
     if hasattr(gemini_response, 'candidates') and gemini_response.candidates:
         for i, candidate in enumerate(gemini_response.candidates):
-            final_reasoning_content_str, final_normal_content_str = parse_gemini_response_for_reasoning_and_content(candidate)
+            # ------ Start of new logic for parsing candidate based on tags ------
+            # Step 1: Get the full raw text from the candidate.
+            # This text is what the Gemini model now sends for non-streaming/fake-streaming,
+            # potentially like: "<tag>thought</tag>actual_response"
+            _full_raw_text_from_candidate = ""
+            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts') and candidate.content.parts:
+                # Concatenate all text parts from the candidate
+                for _part_item in candidate.content.parts:
+                    if hasattr(_part_item, 'text') and _part_item.text is not None:
+                        _full_raw_text_from_candidate += str(_part_item.text)
+            elif hasattr(candidate, 'text') and candidate.text is not None: # Fallback for simpler candidate structure
+                _full_raw_text_from_candidate = str(candidate.text)
+
+            # Step 2: Parse this _full_raw_text_from_candidate using thought_tag_marker
+            # Initialize with defaults: all text is normal content, no reasoning.
+            final_reasoning_content_str = ""
+            final_normal_content_str = _full_raw_text_from_candidate
+
+            # Regex to find reasoning and content, assuming <tag>reasoning</tag>content structure.
+            # The tag must be at the beginning of the text (after optional whitespace).
+            # (.*?) for reasoning is non-greedy, (.*) for content is greedy for the rest.
+            # Matching is case-sensitive for the tag itself.
+            _tag_pattern = re.compile(rf"^\s*<{re.escape(thought_tag_marker)}>(.*?)</{re.escape(thought_tag_marker)}>(.*)", re.DOTALL)
+            _match = _tag_pattern.match(_full_raw_text_from_candidate)
+
+            if _match:
+                final_reasoning_content_str = _match.group(1)
+                final_normal_content_str = _match.group(2)
+            # If no match, final_reasoning_content_str remains "" and final_normal_content_str holds the full text.
+            # ------ End of new logic ------
 
             if is_encrypt_full:
                 final_reasoning_content_str = deobfuscate_text(final_reasoning_content_str)
                 final_normal_content_str = deobfuscate_text(final_normal_content_str)
-
-            message_payload = {"role": "assistant", "content": final_normal_content_str}
+            
+            combined_content = final_normal_content_str
             if final_reasoning_content_str:
-                message_payload['reasoning_content'] = final_reasoning_content_str
+                tagged_reasoning = f"<{thought_tag_marker}>{final_reasoning_content_str}</{thought_tag_marker}>"
+                combined_content = tagged_reasoning + final_normal_content_str
+                print(f"DEBUG_GEMINI_NON_STREAM_TAGGED: Tag: {thought_tag_marker}, Reasoning len: {len(final_reasoning_content_str)}, Content len: {len(final_normal_content_str)}")
+
+
+            message_payload = {"role": "assistant", "content": combined_content}
+            # Remove old 'reasoning_content' field if present
+            # if 'reasoning_content' in message_payload:
+            #     del message_payload['reasoning_content'] # This was illustrative, not needed as it's a new dict
             
             choice_item = {"index": i, "message": message_payload, "finish_reason": "stop"}
             if hasattr(candidate, 'logprobs'):
@@ -262,15 +299,16 @@ def convert_to_openai_format(gemini_response: Any, model: str) -> Dict[str, Any]
             choices.append(choice_item)
             
     elif hasattr(gemini_response, 'text') and gemini_response.text is not None:
+         # No reasoning part for simple text response, so no tagging
          content_str = deobfuscate_text(gemini_response.text) if is_encrypt_full else (gemini_response.text or "")
          choices.append({"index": 0, "message": {"role": "assistant", "content": content_str}, "finish_reason": "stop"})
-    else: 
+    else:
          choices.append({"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"})
 
     return {
         "id": f"chatcmpl-{int(time.time())}", "object": "chat.completion", "created": int(time.time()),
         "model": model, "choices": choices,
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0} 
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     }
 
 def convert_chunk_to_openai(chunk: Any, model: str, response_id: str, candidate_index: int = 0) -> str:
