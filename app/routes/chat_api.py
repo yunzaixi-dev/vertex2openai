@@ -23,7 +23,8 @@ from message_processing import (
     create_gemini_prompt,
     create_encrypted_gemini_prompt,
     create_encrypted_full_gemini_prompt,
-    split_text_by_completion_tokens # Added
+    split_text_by_completion_tokens, # Added
+    extract_reasoning_by_tags # Added for new reasoning logic
 )
 from api_helpers import (
     create_generation_config,
@@ -37,10 +38,6 @@ router = APIRouter()
 @router.post("/v1/chat/completions")
 async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api_key: str = Depends(get_api_key)):
     try:
-        # Extract thought_tag_marker from the request model's extra fields
-        openai_extra_body = request.model_extra.get("openai_extra_body", {}) if request.model_extra else {}
-        thought_tag_marker = openai_extra_body.get("google", {}).get("thought_tag_marker", "vertex_think_tag")
-
         credential_manager_instance = fastapi_request.app.state.credential_manager
         OPENAI_DIRECT_SUFFIX = "-openai"
         EXPERIMENTAL_MARKER = "-exp-"
@@ -236,20 +233,20 @@ STRICT OPERATING PROTOCOL:
                     print(f"INFO: OpenAI Fake Streaming (SSE Simulation) ENABLED for model '{request.model}'.")
                     # openai_params already has "stream": True from initial setup,
                     # but openai_fake_stream_generator will make a stream=False call internally.
-                    # Call the now async generator
+                    # Retrieve the marker before the call
+                    openai_extra_body_from_req = getattr(request, 'openai_extra_body', None)
+                    thought_tag_marker = openai_extra_body_from_req.get("google", {}).get("thought_tag_marker") if openai_extra_body_from_req else None
+
+                    # Call the generator with updated signature
                     return StreamingResponse(
-                        openai_fake_stream_generator( # REMOVED await here
+                        openai_fake_stream_generator(
                             openai_client=openai_client,
                             openai_params=openai_params,
-                            openai_extra_body=openai_extra_body,
+                            openai_extra_body=openai_extra_body, # Keep passing the full extra_body as it might be used elsewhere
                             request_obj=request,
-                            is_auto_attempt=False,
-                            # --- New parameters for tokenizer and reasoning split ---
-                            gcp_credentials=rotated_credentials,
-                            gcp_project_id=PROJECT_ID, # This is rotated_project_id
-                            gcp_location=LOCATION,     # This is "global"
-                            base_model_id_for_tokenizer=base_model_name, # Stripped model ID for tokenizer
-                            thought_tag_marker=thought_tag_marker # Pass the tag marker
+                            is_auto_attempt=False, # Assuming this remains false for direct calls
+                            thought_tag_marker=thought_tag_marker # Pass the marker for tag-based split
+                            # Removed gcp_credentials, gcp_project_id, gcp_location, base_model_id_for_tokenizer
                         ),
                         media_type="text/event-stream"
                     )
@@ -326,47 +323,35 @@ STRICT OPERATING PROTOCOL:
                         if choices and isinstance(choices, list) and len(choices) > 0:
                             message_dict = choices[0].get('message')
                             if message_dict and isinstance(message_dict, dict):
-                                # Always remove extra_content from the message if it exists, before any splitting
+                                # Always remove extra_content from the message if it exists
                                 if 'extra_content' in message_dict:
                                     del message_dict['extra_content']
-                                    print("DEBUG: Removed 'extra_content' from response message.")
+                                    # print("DEBUG: Removed 'extra_content' from response message.") # Optional debug log
 
-                                if isinstance(vertex_completion_tokens, int) and vertex_completion_tokens > 0:
-                                    full_content = message_dict.get('content')
-                                    if isinstance(full_content, str) and full_content:
-                                        model_id_for_tokenizer = base_model_name
-                                        
-                                        reasoning_text, actual_content, dbg_all_tokens = await asyncio.to_thread(
-                                            split_text_by_completion_tokens, # Use imported function
-                                            rotated_credentials,
-                                            PROJECT_ID,
-                                            LOCATION,
-                                            model_id_for_tokenizer,
-                                            full_content,
-                                            vertex_completion_tokens
-                                        )
+                                # --- Start Replacement Block (Tag-based reasoning extraction) ---
+                                openai_extra_body = getattr(request, 'openai_extra_body', None)
+                                thought_tag_marker = openai_extra_body.get("google", {}).get("thought_tag_marker") if openai_extra_body else None
+                                full_content = message_dict.get('content')
+                                reasoning_text = ""
+                                actual_content = full_content if isinstance(full_content, str) else "" # Ensure string
 
-                                        if reasoning_text:
-                                            tagged_reasoning = f"<{thought_tag_marker}>{reasoning_text}</{thought_tag_marker}>"
-                                            message_dict['content'] = tagged_reasoning + actual_content
-                                            if 'reasoning_content' in message_dict: # Clean up old field if present
-                                                del message_dict['reasoning_content']
-                                            print(f"DEBUG_REASONING_TAGGED_NON_STREAM: Successful. Tag: {thought_tag_marker}, Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content)}")
-                                            print(f"  Vertex completion_tokens: {vertex_completion_tokens}. Our tokenizer total tokens: {len(dbg_all_tokens)}")
-                                        else:
-                                            message_dict['content'] = actual_content
-                                            if 'reasoning_content' in message_dict: # Clean up old field
-                                                del message_dict['reasoning_content']
-                                            if "".join(dbg_all_tokens) != full_content : # Content was re-joined from tokens but no reasoning
-                                                print(f"INFO: Content reconstructed from tokens. Original len: {len(full_content)}, Reconstructed len: {len(actual_content)}")
-                                        # else: No reasoning, and content is original full_content because num_completion_tokens was invalid or zero.
-                                            
+                                if thought_tag_marker and actual_content: # Check if marker and content exist
+                                    print(f"INFO: OpenAI Direct Non-Streaming - Applying tag extraction with marker: '{thought_tag_marker}'")
+                                    reasoning_text, actual_content = extract_reasoning_by_tags(actual_content, thought_tag_marker)
+                                    message_dict['content'] = actual_content # Update the dictionary
+                                    if reasoning_text:
+                                        message_dict['reasoning_content'] = reasoning_text
+                                        print(f"DEBUG: Tag extraction success. Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content)}")
                                     else:
-                                         print(f"WARNING: Full content is not a string or is empty. Cannot perform split. Content: {full_content}")
+                                        print("DEBUG: Tag marker present but no content found within tags.")
+                                elif actual_content:
+                                     print("INFO: OpenAI Direct Non-Streaming - No thought_tag_marker provided. Content passed as is.")
+                                     # 'content' already contains full_content
                                 else:
-                                    print(f"INFO: No positive vertex_completion_tokens ({vertex_completion_tokens}) found in usage, or no message content. No split or tagging performed.")
-                                    if 'reasoning_content' in message_dict: # Ensure cleanup if it somehow exists
-                                        del message_dict['reasoning_content']
+                                    print(f"WARNING: OpenAI Direct Non-Streaming - No initial content found in message. Content: {message_dict.get('content')}")
+                                    message_dict['content'] = "" # Ensure content key exists and is empty string
+
+                                # --- End Replacement Block ---
                     except Exception as e_reasoning_processing:
                         print(f"WARNING: Error during non-streaming reasoning token processing for model {request.model} due to: {e_reasoning_processing}.")
                         
@@ -389,7 +374,7 @@ STRICT OPERATING PROTOCOL:
                 current_gen_config = attempt["config_modifier"](generation_config.copy())
                 try:
                     # Pass is_auto_attempt=True for auto-mode calls
-                    return await execute_gemini_call(client_to_use, attempt["model"], attempt["prompt_func"], current_gen_config, request, thought_tag_marker, is_auto_attempt=True)
+                    return await execute_gemini_call(client_to_use, attempt["model"], attempt["prompt_func"], current_gen_config, request, is_auto_attempt=True)
                 except Exception as e_auto:
                     last_err = e_auto
                     print(f"Auto-attempt '{attempt['name']}' for model {attempt['model']} failed: {e_auto}")
@@ -438,7 +423,7 @@ STRICT OPERATING PROTOCOL:
             # but the API call might need the full "gemini-1.5-pro-search".
             # Let's use `request.model` for the API call here, and `base_model_name` for checks like Express eligibility.
             # For non-auto mode, is_auto_attempt defaults to False in execute_gemini_call
-            return await execute_gemini_call(client_to_use, base_model_name, current_prompt_func, generation_config, request, thought_tag_marker)
+            return await execute_gemini_call(client_to_use, base_model_name, current_prompt_func, generation_config, request)
 
     except Exception as e:
         error_msg = f"Unexpected error in chat_completions endpoint: {str(e)}"
