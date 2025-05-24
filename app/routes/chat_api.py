@@ -223,6 +223,7 @@ STRICT OPERATING PROTOCOL:
                 "extra_body": {
                     'google': {
                         'safety_settings': openai_safety_settings
+                        # REMOVED 'thought_tag_marker' - will be added conditionally below
                     }
                 }
             }
@@ -244,9 +245,9 @@ STRICT OPERATING PROTOCOL:
                             openai_params=openai_params,
                             openai_extra_body=openai_extra_body, # Keep passing the full extra_body as it might be used elsewhere
                             request_obj=request,
-                            is_auto_attempt=False, # Assuming this remains false for direct calls
-                            thought_tag_marker=thought_tag_marker # Pass the marker for tag-based split
-                            # Removed gcp_credentials, gcp_project_id, gcp_location, base_model_id_for_tokenizer
+                            is_auto_attempt=False # Assuming this remains false for direct calls
+                            # Removed thought_tag_marker argument
+                            # Removed gcp_credentials, gcp_project_id, gcp_location, base_model_id_for_tokenizer previously
                         ),
                         media_type="text/event-stream"
                     )
@@ -302,65 +303,71 @@ STRICT OPERATING PROTOCOL:
                             yield "data: [DONE]\n\n"
                     return StreamingResponse(openai_true_stream_generator(), media_type="text/event-stream")
             else: # Not streaming (is_openai_direct_model and not request.stream)
-                try:
-                    # Ensure stream=False is explicitly passed for non-streaming
-                    openai_params_for_non_stream = {**openai_params, "stream": False}
-                    response = await openai_client.chat.completions.create(
-                        **openai_params_for_non_stream,
-                        # Removed redundant **openai_params spread
-                        extra_body=openai_extra_body
-                    )
-                    response_dict = response.model_dump(exclude_unset=True, exclude_none=True)
-                    
-                    try:
-                        usage = response_dict.get('usage')
-                        vertex_completion_tokens = 0
+                    # Conditionally add the tag marker ONLY for non-streaming
+                    extra_body_for_call = openai_extra_body.copy() # Avoid modifying the original dict used elsewhere
+                    if 'google' not in extra_body_for_call.get('extra_body', {}):
+                        if 'extra_body' not in extra_body_for_call: extra_body_for_call['extra_body'] = {}
+                        extra_body_for_call['extra_body']['google'] = {}
+                    extra_body_for_call['extra_body']['google']['thought_tag_marker'] = 'vertex_think_tag'
+                    print("DEBUG: Adding 'thought_tag_marker' for non-streaming call.")
+
+                    try: # Corrected indentation for entire block
+                        # Ensure stream=False is explicitly passed for non-streaming
+                        openai_params_for_non_stream = {**openai_params, "stream": False}
+                        response = await openai_client.chat.completions.create(
+                            **openai_params_for_non_stream,
+                            # Removed redundant **openai_params spread
+                            extra_body=extra_body_for_call # Use the modified extra_body for non-streaming call
+                        )
+                        response_dict = response.model_dump(exclude_unset=True, exclude_none=True)
                         
-                        if usage and isinstance(usage, dict):
-                            vertex_completion_tokens = usage.get('completion_tokens')
+                        try:
+                            usage = response_dict.get('usage')
+                            vertex_completion_tokens = 0 # Keep this for potential future use, but not used for split
+                            
+                            if usage and isinstance(usage, dict):
+                                vertex_completion_tokens = usage.get('completion_tokens')
 
-                        choices = response_dict.get('choices')
-                        if choices and isinstance(choices, list) and len(choices) > 0:
-                            message_dict = choices[0].get('message')
-                            if message_dict and isinstance(message_dict, dict):
-                                # Always remove extra_content from the message if it exists
-                                if 'extra_content' in message_dict:
-                                    del message_dict['extra_content']
-                                    # print("DEBUG: Removed 'extra_content' from response message.") # Optional debug log
+                            choices = response_dict.get('choices')
+                            if choices and isinstance(choices, list) and len(choices) > 0:
+                                message_dict = choices[0].get('message')
+                                if message_dict and isinstance(message_dict, dict):
+                                    # Always remove extra_content from the message if it exists
+                                    if 'extra_content' in message_dict:
+                                        del message_dict['extra_content']
+                                        # print("DEBUG: Removed 'extra_content' from response message.") # Optional debug log
 
-                                # --- Start Replacement Block (Tag-based reasoning extraction) ---
-                                openai_extra_body = getattr(request, 'openai_extra_body', None)
-                                thought_tag_marker = openai_extra_body.get("google", {}).get("thought_tag_marker") if openai_extra_body else None
-                                full_content = message_dict.get('content')
-                                reasoning_text = ""
-                                actual_content = full_content if isinstance(full_content, str) else "" # Ensure string
+                                    # --- Start Revised Block (Fixed tag reasoning extraction) ---
+                                    # No longer need to get marker from request
+                                    full_content = message_dict.get('content')
+                                    reasoning_text = ""
+                                    actual_content = full_content if isinstance(full_content, str) else "" # Ensure string
 
-                                if thought_tag_marker and actual_content: # Check if marker and content exist
-                                    print(f"INFO: OpenAI Direct Non-Streaming - Applying tag extraction with marker: '{thought_tag_marker}'")
-                                    reasoning_text, actual_content = extract_reasoning_by_tags(actual_content, thought_tag_marker)
-                                    message_dict['content'] = actual_content # Update the dictionary
-                                    if reasoning_text:
-                                        message_dict['reasoning_content'] = reasoning_text
-                                        print(f"DEBUG: Tag extraction success. Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content)}")
+                                    fixed_tag = "vertex_think_tag" # Use the fixed tag name
+                                    if actual_content: # Check if content exists
+                                        print(f"INFO: OpenAI Direct Non-Streaming - Applying tag extraction with fixed marker: '{fixed_tag}'")
+                                        # Unconditionally attempt extraction with the fixed tag
+                                        reasoning_text, actual_content = extract_reasoning_by_tags(actual_content, fixed_tag)
+                                        message_dict['content'] = actual_content # Update the dictionary
+                                        if reasoning_text:
+                                            message_dict['reasoning_content'] = reasoning_text
+                                            print(f"DEBUG: Tag extraction success (fixed tag). Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content)}")
+                                        else:
+                                            print(f"DEBUG: No content found within fixed tag '{fixed_tag}'.")
                                     else:
-                                        print("DEBUG: Tag marker present but no content found within tags.")
-                                elif actual_content:
-                                     print("INFO: OpenAI Direct Non-Streaming - No thought_tag_marker provided. Content passed as is.")
-                                     # 'content' already contains full_content
-                                else:
-                                    print(f"WARNING: OpenAI Direct Non-Streaming - No initial content found in message. Content: {message_dict.get('content')}")
-                                    message_dict['content'] = "" # Ensure content key exists and is empty string
+                                        print(f"WARNING: OpenAI Direct Non-Streaming - No initial content found in message. Content: {message_dict.get('content')}")
+                                        message_dict['content'] = "" # Ensure content key exists and is empty string
 
-                                # --- End Replacement Block ---
-                    except Exception as e_reasoning_processing:
-                        print(f"WARNING: Error during non-streaming reasoning token processing for model {request.model} due to: {e_reasoning_processing}.")
-                        
-                    return JSONResponse(content=response_dict)
-                except Exception as generate_error:
-                    error_msg_generate = f"Error calling OpenAI client for {request.model}: {str(generate_error)}"
-                    print(f"ERROR: {error_msg_generate}")
-                    error_response = create_openai_error_response(500, error_msg_generate, "server_error")
-                    return JSONResponse(status_code=500, content=error_response)
+                                    # --- End Revised Block ---
+                        except Exception as e_reasoning_processing:
+                            print(f"WARNING: Error during non-streaming reasoning token processing for model {request.model} due to: {e_reasoning_processing}.")
+                            
+                        return JSONResponse(content=response_dict)
+                    except Exception as generate_error: # Corrected indentation for except block
+                        error_msg_generate = f"Error calling OpenAI client for {request.model}: {str(generate_error)}"
+                        print(f"ERROR: {error_msg_generate}")
+                        error_response = create_openai_error_response(500, error_msg_generate, "server_error")
+                        return JSONResponse(status_code=500, content=error_response)
         elif is_auto_model:
             print(f"Processing auto model: {request.model}")
             attempts = [

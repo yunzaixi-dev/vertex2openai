@@ -236,14 +236,14 @@ async def gemini_fake_stream_generator( # Changed to async
         # Consider re-raising if auto-mode needs to catch this: raise e_outer_gemini
 
 
-async def openai_fake_stream_generator( # Updated signature
+async def openai_fake_stream_generator( # Reverted signature: removed thought_tag_marker
     openai_client: AsyncOpenAI,
     openai_params: Dict[str, Any],
     openai_extra_body: Dict[str, Any],
     request_obj: OpenAIRequest,
-    is_auto_attempt: bool,
-    thought_tag_marker: str | None # New param for tag-based split
-    # Removed gcp_credentials, gcp_project_id, gcp_location, base_model_id_for_tokenizer
+    is_auto_attempt: bool
+    # Removed thought_tag_marker as parsing uses a fixed tag now
+    # Removed gcp_credentials, gcp_project_id, gcp_location, base_model_id_for_tokenizer previously
 ):
     api_model_name = openai_params.get("model", "unknown-openai-model")
     print(f"FAKE STREAMING (OpenAI): Prep for '{request_obj.model}' (API model: '{api_model_name}') with reasoning split.")
@@ -253,8 +253,16 @@ async def openai_fake_stream_generator( # Updated signature
         params_for_non_stream_call = openai_params.copy()
         params_for_non_stream_call['stream'] = False
         
+        # Add the tag marker specifically for the internal non-streaming call in fake streaming
+        extra_body_for_internal_call = openai_extra_body.copy() # Avoid modifying the original dict
+        if 'google' not in extra_body_for_internal_call.get('extra_body', {}):
+             if 'extra_body' not in extra_body_for_internal_call: extra_body_for_internal_call['extra_body'] = {}
+             extra_body_for_internal_call['extra_body']['google'] = {}
+        extra_body_for_internal_call['extra_body']['google']['thought_tag_marker'] = 'vertex_think_tag'
+        print("DEBUG: Adding 'thought_tag_marker' for fake-streaming internal call.")
+
         _api_call_task = asyncio.create_task(
-            openai_client.chat.completions.create(**params_for_non_stream_call, extra_body=openai_extra_body)
+            openai_client.chat.completions.create(**params_for_non_stream_call, extra_body=extra_body_for_internal_call) # Use modified extra_body
         )
         raw_response = await _api_call_task
         full_content_from_api = ""
@@ -268,20 +276,20 @@ async def openai_fake_stream_generator( # Updated signature
         # Ensure actual_content_text is a string even if API returns None
         actual_content_text = full_content_from_api if isinstance(full_content_from_api, str) else ""
 
-        if thought_tag_marker and actual_content_text: # Check if marker and content exist
-            print(f"INFO: OpenAI Direct Fake-Streaming - Applying tag extraction with marker: '{thought_tag_marker}'")
-            reasoning_text, actual_content_text = extract_reasoning_by_tags(actual_content_text, thought_tag_marker)
+        fixed_tag = "vertex_think_tag" # Use the fixed tag name
+        if actual_content_text: # Check if content exists
+            print(f"INFO: OpenAI Direct Fake-Streaming - Applying tag extraction with fixed marker: '{fixed_tag}'")
+            # Unconditionally attempt extraction with the fixed tag
+            reasoning_text, actual_content_text = extract_reasoning_by_tags(actual_content_text, fixed_tag)
             if reasoning_text:
-                 print(f"DEBUG: Tag extraction success. Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content_text)}")
+                 print(f"DEBUG: Tag extraction success (fixed tag). Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content_text)}")
             else:
-                 print("DEBUG: Tag marker present but no content found within tags.")
-        elif actual_content_text:
-            print("INFO: OpenAI Direct Fake-Streaming - No thought_tag_marker provided. Content passed as is.")
+                 print(f"DEBUG: No content found within fixed tag '{fixed_tag}'.")
         else:
              print(f"WARNING: OpenAI Direct Fake-Streaming - No initial content found in message.")
              actual_content_text = "" # Ensure empty string
 
-        # --- End Inserted Block ---
+        # --- End Revised Block ---
 
         # The return uses the potentially modified variables:
         return raw_response, reasoning_text, actual_content_text
