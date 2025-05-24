@@ -140,8 +140,8 @@ async def gemini_fake_stream_generator( # Changed to async
     is_auto_attempt: bool,
     thought_tag_marker: str
 ):
-    model_name_for_log = getattr(gemini_client_instance, 'model_name', 'unknown_gemini_model_object')
-    print(f"FAKE STREAMING (Gemini): Prep for '{request_obj.model}' (API model string: '{model_for_api_call}', client obj: '{model_name_for_log}') with thought_tag_marker: '{thought_tag_marker}'.")
+
+    print(f"FAKE STREAMING (Gemini): Prep for '{request_obj.model}' with reasoning separation.")
     response_id = f"chatcmpl-{int(time.time())}"
 
     # 1. Create and await the API call task
@@ -231,8 +231,7 @@ async def openai_fake_stream_generator(
     base_model_id_for_tokenizer: str,
     thought_tag_marker: str
 ):
-    api_model_name = openai_params.get("model", "unknown-openai-model")
-    print(f"FAKE STREAMING (OpenAI): Prep for '{request_obj.model}' (API model: '{api_model_name}') with thought_tag_marker: '{thought_tag_marker}'.")
+    print(f"FAKE STREAMING (OpenAI): Prep for '{request_obj.model}' with reasoning split.")
     response_id = f"chatcmpl-{int(time.time())}"
     
     async def _openai_api_call_and_split_task_creator_wrapper():
