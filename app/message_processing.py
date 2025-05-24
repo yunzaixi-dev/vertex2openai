@@ -223,11 +223,8 @@ def parse_gemini_response_for_reasoning_and_content(gemini_response_candidate: A
     # Check if gemini_response_candidate itself resembles a part_item with 'thought'
     # This might be relevant for direct part processing in stream chunks if candidate structure is shallow
     candidate_part_text = ""
-    is_candidate_itself_thought = False
     if hasattr(gemini_response_candidate, 'text') and gemini_response_candidate.text is not None:
         candidate_part_text = str(gemini_response_candidate.text)
-    if hasattr(gemini_response_candidate, 'thought') and gemini_response_candidate.thought is True:
-        is_candidate_itself_thought = True
 
     # Primary logic: Iterate through parts of the candidate's content object
     gemini_candidate_content = None
@@ -244,9 +241,7 @@ def parse_gemini_response_for_reasoning_and_content(gemini_response_candidate: A
                 reasoning_text_parts.append(part_text)
             else:
                 normal_text_parts.append(part_text)
-    elif is_candidate_itself_thought: # Candidate itself was a thought part (e.g. direct part from a stream)
-        reasoning_text_parts.append(candidate_part_text)
-    elif candidate_part_text: # Candidate had text but no parts and was not a thought itself
+    if candidate_part_text: # Candidate had text but no parts and was not a thought itself
         normal_text_parts.append(candidate_part_text)
     # If no parts and no direct text on candidate, both lists remain empty.
     
@@ -255,7 +250,7 @@ def parse_gemini_response_for_reasoning_and_content(gemini_response_candidate: A
         normal_text_parts.append(str(gemini_candidate_content.text))
     # Fallback if no .content but direct .text on candidate
     elif hasattr(gemini_response_candidate, 'text') and gemini_response_candidate.text is not None and not gemini_candidate_content:
-         normal_text_parts.append(str(gemini_response_candidate.text))
+        normal_text_parts.append(str(gemini_response_candidate.text))
 
     return "".join(reasoning_text_parts), "".join(normal_text_parts)
 
