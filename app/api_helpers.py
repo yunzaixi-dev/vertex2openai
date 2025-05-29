@@ -91,6 +91,33 @@ class StreamingReasoningProcessor:
                     self.inside_tag = False
         
         return processed_content, current_reasoning
+    
+    def flush_remaining(self) -> tuple[str, str]:
+        """
+        Flush any remaining content in the buffer when the stream ends.
+        
+        Returns:
+            A tuple of:
+            - remaining_content: Any content that was buffered but not yet output
+            - remaining_reasoning: Any incomplete reasoning if we were inside a tag
+        """
+        remaining_content = ""
+        remaining_reasoning = ""
+        
+        if self.tag_buffer and not self.inside_tag:
+            # If we have buffered content and we're not inside a tag,
+            # it's safe to output all of it
+            remaining_content = self.tag_buffer
+            self.tag_buffer = ""
+        elif self.inside_tag:
+            # If we're inside a tag when the stream ends, we have an unclosed tag
+            # Return the partial content as regular content (including the opening tag)
+            remaining_content = f"<{self.tag_name}>{self.reasoning_buffer}{self.tag_buffer}"
+            self.reasoning_buffer = ""
+            self.tag_buffer = ""
+            self.inside_tag = False
+        
+        return remaining_content, remaining_reasoning
 
 
 def process_streaming_content_with_reasoning_tags(

@@ -120,8 +120,10 @@ class OpenAIDirectHandler:
             
             # Create processor for tag-based extraction across chunks
             reasoning_processor = StreamingReasoningProcessor(VERTEX_REASONING_TAG)
+            chunk_count = 0
             
             async for chunk in stream_response:
+                chunk_count += 1
                 try:
                     chunk_as_dict = chunk.model_dump(exclude_unset=True, exclude_none=True)
                     
@@ -134,10 +136,14 @@ class OpenAIDirectHandler:
                                 del delta['extra_content']
                             
                             content = delta.get('content', '')
-                            print(content)
                             if content:
+                                print(f"DEBUG: Chunk {chunk_count} - Raw content: '{content}'")
                                 # Use the processor to extract reasoning
                                 processed_content, current_reasoning = reasoning_processor.process_chunk(content)
+                                
+                                # Debug logging for processing results
+                                if processed_content or current_reasoning:
+                                    print(f"DEBUG: Chunk {chunk_count} - Processed content: '{processed_content}', Reasoning: '{current_reasoning[:50]}...' if len(current_reasoning) > 50 else '{current_reasoning}'")
                                 
                                 # Update delta with processed content
                                 if current_reasoning:
@@ -159,20 +165,37 @@ class OpenAIDirectHandler:
                     yield "data: [DONE]\n\n"
                     return
             
-            # Handle any remaining buffer content
-            if reasoning_processor.tag_buffer and not reasoning_processor.inside_tag:
-                # Output any remaining content
+            # Debug logging for buffer state and chunk count
+            print(f"DEBUG: Stream ended after {chunk_count} chunks. Buffer state - tag_buffer: '{reasoning_processor.tag_buffer}', "
+                  f"inside_tag: {reasoning_processor.inside_tag}, "
+                  f"reasoning_buffer: '{reasoning_processor.reasoning_buffer[:50]}...' if reasoning_processor.reasoning_buffer else ''")
+            
+            # Flush any remaining buffered content
+            remaining_content, remaining_reasoning = reasoning_processor.flush_remaining()
+            
+            if remaining_content:
+                print(f"DEBUG: Flushing remaining content: '{remaining_content}'")
                 final_chunk = {
                     "id": f"chatcmpl-{int(time.time())}",
                     "object": "chat.completion.chunk",
                     "created": int(time.time()),
                     "model": request.model,
-                    "choices": [{"index": 0, "delta": {"content": reasoning_processor.tag_buffer}, "finish_reason": None}]
+                    "choices": [{"index": 0, "delta": {"content": remaining_content}, "finish_reason": None}]
                 }
                 yield f"data: {json.dumps(final_chunk)}\n\n"
-            elif reasoning_processor.inside_tag and reasoning_processor.reasoning_buffer:
-                # We were inside a tag but never found the closing tag
-                print(f"WARNING: Unclosed reasoning tag detected. Partial reasoning: {reasoning_processor.reasoning_buffer[:100]}...")
+                
+                # Send a proper finish reason chunk
+                finish_chunk = {
+                    "id": f"chatcmpl-{int(time.time())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": request.model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                }
+                yield f"data: {json.dumps(finish_chunk)}\n\n"
+            
+            # Note: remaining_reasoning is not used here since incomplete reasoning
+            # is treated as regular content when tags are unclosed
             
             yield "data: [DONE]\n\n"
             
