@@ -115,7 +115,7 @@ class OpenAIDirectHandler:
             openai_params_for_stream = {**openai_params, "stream": True}
             stream_response = await openai_client.chat.completions.create(
                 **openai_params_for_stream,
-                extra_body=openai_extra_body['extra_body']
+                extra_body=openai_extra_body
             )
             
             # Create processor for tag-based extraction across chunks
@@ -199,7 +199,7 @@ class OpenAIDirectHandler:
             openai_params_non_stream = {**openai_params, "stream": False}
             response = await openai_client.chat.completions.create(
                 **openai_params_non_stream,
-                extra_body=openai_extra_body['extra_body']
+                extra_body=openai_extra_body
             )
             response_dict = response.model_dump(exclude_unset=True, exclude_none=True)
             

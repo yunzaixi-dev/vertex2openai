@@ -365,7 +365,7 @@ async def openai_fake_stream_generator( # Reverted signature: removed thought_ta
         
         # Use the already configured extra_body which includes the thought_tag_marker
         _api_call_task = asyncio.create_task(
-            openai_client.chat.completions.create(**params_for_non_stream_call, extra_body=openai_extra_body['extra_body'])
+            openai_client.chat.completions.create(**params_for_non_stream_call, extra_body=openai_extra_body)
         )
         raw_response = await _api_call_task
         full_content_from_api = ""
