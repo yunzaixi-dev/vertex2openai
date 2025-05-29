@@ -134,6 +134,7 @@ class OpenAIDirectHandler:
                                 del delta['extra_content']
                             
                             content = delta.get('content', '')
+                            print(content)
                             if content:
                                 # Use the processor to extract reasoning
                                 processed_content, current_reasoning = reasoning_processor.process_chunk(content)
