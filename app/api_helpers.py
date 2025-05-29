@@ -2,27 +2,137 @@ import json
 import time
 import math
 import asyncio
-import base64 
+import base64
 from typing import List, Dict, Any, Callable, Union, Optional
 
 from fastapi.responses import JSONResponse, StreamingResponse
 from google.auth.transport.requests import Request as AuthRequest
 from google.genai import types
-from google.genai.types import HttpOptions 
+from google.genai.types import HttpOptions
 from google import genai # Original import
 from openai import AsyncOpenAI
 
 from models import OpenAIRequest, OpenAIMessage
 from message_processing import (
-    deobfuscate_text, 
-    convert_to_openai_format, 
-    convert_chunk_to_openai, 
+    deobfuscate_text,
+    convert_to_openai_format,
+    convert_chunk_to_openai,
     create_final_chunk,
     split_text_by_completion_tokens,
     parse_gemini_response_for_reasoning_and_content, # Added import
     extract_reasoning_by_tags # Added for new OpenAI direct reasoning logic
 )
 import config as app_config
+from config import VERTEX_REASONING_TAG
+
+class StreamingReasoningProcessor:
+    """Stateful processor for extracting reasoning from streaming content with tags."""
+    
+    def __init__(self, tag_name: str = VERTEX_REASONING_TAG):
+        self.tag_name = tag_name
+        self.open_tag = f"<{tag_name}>"
+        self.close_tag = f"</{tag_name}>"
+        self.tag_buffer = ""
+        self.inside_tag = False
+        self.reasoning_buffer = ""
+    
+    def process_chunk(self, content: str) -> tuple[str, str]:
+        """
+        Process a chunk of streaming content.
+        
+        Args:
+            content: New content from the stream
+            
+        Returns:
+            A tuple of:
+            - processed_content: Content with reasoning tags removed
+            - current_reasoning: Complete reasoning text if a closing tag was found
+        """
+        # Add new content to buffer
+        self.tag_buffer += content
+        
+        processed_content = ""
+        current_reasoning = ""
+        
+        while self.tag_buffer:
+            if not self.inside_tag:
+                # Look for opening tag
+                open_pos = self.tag_buffer.find(self.open_tag)
+                if open_pos == -1:
+                    # No opening tag found
+                    if len(self.tag_buffer) >= len(self.open_tag):
+                        # Safe to output all but the last few chars (in case tag is split)
+                        safe_length = len(self.tag_buffer) - len(self.open_tag) + 1
+                        processed_content += self.tag_buffer[:safe_length]
+                        self.tag_buffer = self.tag_buffer[safe_length:]
+                    break
+                else:
+                    # Found opening tag
+                    processed_content += self.tag_buffer[:open_pos]
+                    self.tag_buffer = self.tag_buffer[open_pos + len(self.open_tag):]
+                    self.inside_tag = True
+            else:
+                # Inside tag, look for closing tag
+                close_pos = self.tag_buffer.find(self.close_tag)
+                if close_pos == -1:
+                    # No closing tag yet
+                    if len(self.tag_buffer) >= len(self.close_tag):
+                        # Safe to add to reasoning buffer
+                        safe_length = len(self.tag_buffer) - len(self.close_tag) + 1
+                        self.reasoning_buffer += self.tag_buffer[:safe_length]
+                        self.tag_buffer = self.tag_buffer[safe_length:]
+                    break
+                else:
+                    # Found closing tag
+                    self.reasoning_buffer += self.tag_buffer[:close_pos]
+                    current_reasoning = self.reasoning_buffer
+                    self.reasoning_buffer = ""
+                    self.tag_buffer = self.tag_buffer[close_pos + len(self.close_tag):]
+                    self.inside_tag = False
+        
+        return processed_content, current_reasoning
+
+
+def process_streaming_content_with_reasoning_tags(
+    content: str,
+    tag_buffer: str,
+    inside_tag: bool,
+    reasoning_buffer: str,
+    tag_name: str = VERTEX_REASONING_TAG
+) -> tuple[str, str, bool, str, str]:
+    """
+    Process streaming content to extract reasoning within tags.
+    
+    This is a compatibility wrapper for the stateful function. Consider using
+    StreamingReasoningProcessor class directly for cleaner code.
+    
+    Args:
+        content: New content from the stream
+        tag_buffer: Existing buffer for handling tags split across chunks
+        inside_tag: Whether we're currently inside a reasoning tag
+        reasoning_buffer: Buffer for accumulating reasoning content
+        tag_name: The tag name to look for (defaults to VERTEX_REASONING_TAG)
+    
+    Returns:
+        A tuple of:
+        - processed_content: Content with reasoning tags removed
+        - current_reasoning: Complete reasoning text if a closing tag was found
+        - inside_tag: Updated state of whether we're inside a tag
+        - reasoning_buffer: Updated reasoning buffer
+        - tag_buffer: Updated tag buffer
+    """
+    # Create a temporary processor with the current state
+    processor = StreamingReasoningProcessor(tag_name)
+    processor.tag_buffer = tag_buffer
+    processor.inside_tag = inside_tag
+    processor.reasoning_buffer = reasoning_buffer
+    
+    # Process the chunk
+    processed_content, current_reasoning = processor.process_chunk(content)
+    
+    # Return the updated state
+    return (processed_content, current_reasoning, processor.inside_tag,
+            processor.reasoning_buffer, processor.tag_buffer)
 
 def create_openai_error_response(status_code: int, message: str, error_type: str) -> Dict[str, Any]:
     return {
@@ -253,16 +363,9 @@ async def openai_fake_stream_generator( # Reverted signature: removed thought_ta
         params_for_non_stream_call = openai_params.copy()
         params_for_non_stream_call['stream'] = False
         
-        # Add the tag marker specifically for the internal non-streaming call in fake streaming
-        extra_body_for_internal_call = openai_extra_body.copy() # Avoid modifying the original dict
-        if 'google' not in extra_body_for_internal_call.get('extra_body', {}):
-             if 'extra_body' not in extra_body_for_internal_call: extra_body_for_internal_call['extra_body'] = {}
-             extra_body_for_internal_call['extra_body']['google'] = {}
-        extra_body_for_internal_call['extra_body']['google']['thought_tag_marker'] = 'vertex_think_tag'
-        print("DEBUG: Adding 'thought_tag_marker' for fake-streaming internal call.")
-
+        # Use the already configured extra_body which includes the thought_tag_marker
         _api_call_task = asyncio.create_task(
-            openai_client.chat.completions.create(**params_for_non_stream_call, extra_body=extra_body_for_internal_call) # Use modified extra_body
+            openai_client.chat.completions.create(**params_for_non_stream_call, extra_body=openai_extra_body['extra_body'])
         )
         raw_response = await _api_call_task
         full_content_from_api = ""
@@ -276,15 +379,14 @@ async def openai_fake_stream_generator( # Reverted signature: removed thought_ta
         # Ensure actual_content_text is a string even if API returns None
         actual_content_text = full_content_from_api if isinstance(full_content_from_api, str) else ""
 
-        fixed_tag = "vertex_think_tag" # Use the fixed tag name
         if actual_content_text: # Check if content exists
-            print(f"INFO: OpenAI Direct Fake-Streaming - Applying tag extraction with fixed marker: '{fixed_tag}'")
+            print(f"INFO: OpenAI Direct Fake-Streaming - Applying tag extraction with fixed marker: '{VERTEX_REASONING_TAG}'")
             # Unconditionally attempt extraction with the fixed tag
-            reasoning_text, actual_content_text = extract_reasoning_by_tags(actual_content_text, fixed_tag)
+            reasoning_text, actual_content_text = extract_reasoning_by_tags(actual_content_text, VERTEX_REASONING_TAG)
             if reasoning_text:
                  print(f"DEBUG: Tag extraction success (fixed tag). Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content_text)}")
             else:
-                 print(f"DEBUG: No content found within fixed tag '{fixed_tag}'.")
+                 print(f"DEBUG: No content found within fixed tag '{VERTEX_REASONING_TAG}'.")
         else:
              print(f"WARNING: OpenAI Direct Fake-Streaming - No initial content found in message.")
              actual_content_text = "" # Ensure empty string

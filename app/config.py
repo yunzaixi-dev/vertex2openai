@@ -30,4 +30,10 @@ FAKE_STREAMING_INTERVAL_SECONDS = float(os.environ.get("FAKE_STREAMING_INTERVAL"
 # URL for the remote JSON file containing model lists
 MODELS_CONFIG_URL = os.environ.get("MODELS_CONFIG_URL", "https://raw.githubusercontent.com/gzzhongqi/vertex2openai/refs/heads/main/vertexModels.json")
 
+# Constant for the Vertex reasoning tag
+VERTEX_REASONING_TAG = "vertex_think_tag"
+
+# Round-robin credential selection strategy
+ROUNDROBIN = os.environ.get("ROUNDROBIN", "false").lower() == "true"
+
 # Validation logic moved to app/auth.py

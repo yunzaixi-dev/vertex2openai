@@ -81,6 +81,8 @@ class CredentialManager:
         self.project_id = None
         # New: Store credentials loaded directly from JSON objects
         self.in_memory_credentials: List[Dict[str, Any]] = []
+        # Round-robin index for tracking position
+        self.round_robin_index = 0
         self.load_credentials_list() # Load file-based credentials initially
 
     def add_credential_from_json(self, credentials_info: Dict[str, Any]) -> bool:
@@ -186,66 +188,127 @@ class CredentialManager:
         return len(self.credentials_files) + len(self.in_memory_credentials)
 
 
-    def get_random_credentials(self):
+    def _get_all_credential_sources(self):
         """
-        Get a random credential (file or in-memory) and load it.
-        Tries each available credential source at most once in a random order.
+        Get all available credential sources (files and in-memory).
+        Returns a list of dicts with 'type' and 'value' keys.
         """
         all_sources = []
+        
         # Add file paths (as type 'file')
         for file_path in self.credentials_files:
             all_sources.append({'type': 'file', 'value': file_path})
         
         # Add in-memory credentials (as type 'memory_object')
-        # Assuming self.in_memory_credentials stores dicts like {'credentials': cred_obj, 'project_id': pid, 'source': 'json_string'}
         for idx, mem_cred_info in enumerate(self.in_memory_credentials):
             all_sources.append({'type': 'memory_object', 'value': mem_cred_info, 'original_index': idx})
+        
+        return all_sources
 
+    def _load_credential_from_source(self, source_info):
+        """
+        Load a credential from a given source.
+        Returns (credentials, project_id) tuple or (None, None) on failure.
+        """
+        source_type = source_info['type']
+        
+        if source_type == 'file':
+            file_path = source_info['value']
+            print(f"DEBUG: Attempting to load credential from file: {os.path.basename(file_path)}")
+            try:
+                credentials = service_account.Credentials.from_service_account_file(
+                    file_path,
+                    scopes=['https://www.googleapis.com/auth/cloud-platform']
+                )
+                project_id = credentials.project_id
+                print(f"INFO: Successfully loaded credential from file {os.path.basename(file_path)} for project: {project_id}")
+                self.credentials = credentials  # Cache last successfully loaded
+                self.project_id = project_id
+                return credentials, project_id
+            except Exception as e:
+                print(f"ERROR: Failed loading credentials file {os.path.basename(file_path)}: {e}")
+                return None, None
+        
+        elif source_type == 'memory_object':
+            mem_cred_detail = source_info['value']
+            credentials = mem_cred_detail.get('credentials')
+            project_id = mem_cred_detail.get('project_id')
+            
+            if credentials and project_id:
+                print(f"INFO: Using in-memory credential for project: {project_id} (Source: {mem_cred_detail.get('source', 'unknown')})")
+                self.credentials = credentials  # Cache last successfully loaded/used
+                self.project_id = project_id
+                return credentials, project_id
+            else:
+                print(f"WARNING: In-memory credential entry missing 'credentials' or 'project_id' at original index {source_info.get('original_index', 'N/A')}.")
+                return None, None
+        
+        return None, None
+
+    def get_random_credentials(self):
+        """
+        Get a random credential from available sources.
+        Tries each available credential source at most once in random order.
+        Returns (credentials, project_id) tuple or (None, None) if all fail.
+        """
+        all_sources = self._get_all_credential_sources()
+        
         if not all_sources:
-            print("WARNING: No credentials available for random selection (no files or in-memory).")
+            print("WARNING: No credentials available for selection (no files or in-memory).")
             return None, None
-
-        random.shuffle(all_sources) # Shuffle to try in a random order
-
-        for source_info in all_sources:
-            source_type = source_info['type']
-            
-            if source_type == 'file':
-                file_path = source_info['value']
-                print(f"DEBUG: Attempting to load credential from file: {os.path.basename(file_path)}")
-                try:
-                    credentials = service_account.Credentials.from_service_account_file(
-                        file_path,
-                        scopes=['https://www.googleapis.com/auth/cloud-platform']
-                    )
-                    project_id = credentials.project_id
-                    print(f"INFO: Successfully loaded credential from file {os.path.basename(file_path)} for project: {project_id}")
-                    self.credentials = credentials # Cache last successfully loaded
-                    self.project_id = project_id
-                    return credentials, project_id
-                except Exception as e:
-                    print(f"ERROR: Failed loading credentials file {os.path.basename(file_path)}: {e}. Trying next available source.")
-                    continue # Try next source
-            
-            elif source_type == 'memory_object':
-                mem_cred_detail = source_info['value']
-                # The 'credentials' object is already a service_account.Credentials instance
-                credentials = mem_cred_detail.get('credentials')
-                project_id = mem_cred_detail.get('project_id')
-                
-                if credentials and project_id:
-                    print(f"INFO: Using in-memory credential for project: {project_id} (Source: {mem_cred_detail.get('source', 'unknown')})")
-                    # Here, we might want to ensure the credential object is still valid if it can expire
-                    # For service_account.Credentials from_service_account_info, they typically don't self-refresh
-                    # in the same way as ADC, but are long-lived based on the private key.
-                    # If validation/refresh were needed, it would be complex here.
-                    # For now, assume it's usable if present.
-                    self.credentials = credentials # Cache last successfully loaded/used
-                    self.project_id = project_id
-                    return credentials, project_id
-                else:
-                    print(f"WARNING: In-memory credential entry missing 'credentials' or 'project_id' at original index {source_info.get('original_index', 'N/A')}. Skipping.")
-                    continue # Try next source
+        
+        print(f"DEBUG: Using random credential selection strategy.")
+        sources_to_try = all_sources.copy()
+        random.shuffle(sources_to_try)  # Shuffle to try in a random order
+        
+        for source_info in sources_to_try:
+            credentials, project_id = self._load_credential_from_source(source_info)
+            if credentials and project_id:
+                return credentials, project_id
         
         print("WARNING: All available credential sources failed to load.")
         return None, None
+
+    def get_roundrobin_credentials(self):
+        """
+        Get a credential using round-robin selection.
+        Tries credentials in order, cycling through all available sources.
+        Returns (credentials, project_id) tuple or (None, None) if all fail.
+        """
+        all_sources = self._get_all_credential_sources()
+        
+        if not all_sources:
+            print("WARNING: No credentials available for selection (no files or in-memory).")
+            return None, None
+        
+        print(f"DEBUG: Using round-robin credential selection strategy.")
+        
+        # Ensure round_robin_index is within bounds
+        if self.round_robin_index >= len(all_sources):
+            self.round_robin_index = 0
+        
+        # Create ordered list starting from round_robin_index
+        ordered_sources = all_sources[self.round_robin_index:] + all_sources[:self.round_robin_index]
+        
+        # Move to next index for next call
+        self.round_robin_index = (self.round_robin_index + 1) % len(all_sources)
+        
+        # Try credentials in round-robin order
+        for source_info in ordered_sources:
+            credentials, project_id = self._load_credential_from_source(source_info)
+            if credentials and project_id:
+                return credentials, project_id
+        
+        print("WARNING: All available credential sources failed to load.")
+        return None, None
+
+    def get_credentials(self):
+        """
+        Get credentials based on the configured selection strategy.
+        Checks ROUNDROBIN config and calls the appropriate method.
+        Returns (credentials, project_id) tuple or (None, None) if all fail.
+        """
+        if app_config.ROUNDROBIN:
+            return self.get_roundrobin_credentials()
+        else:
+            return self.get_random_credentials()

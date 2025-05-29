@@ -81,8 +81,8 @@ async def init_vertex_ai(credential_manager_instance: CredentialManager) -> bool
             
             # Optional: Attempt to validate one of the credentials by creating a temporary client.
             # This adds a check that at least one credential is functional.
-            print("INFO: Attempting to validate a random credential by creating a temporary client...")
-            temp_creds_val, temp_project_id_val = credential_manager_instance.get_random_credentials()
+            print("INFO: Attempting to validate a credential by creating a temporary client...")
+            temp_creds_val, temp_project_id_val = credential_manager_instance.get_credentials()
             if temp_creds_val and temp_project_id_val:
                 try:
                     _ = genai.Client(vertexai=True, credentials=temp_creds_val, project=temp_project_id_val, location="global")
