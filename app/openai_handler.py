@@ -121,6 +121,7 @@ class OpenAIDirectHandler:
             # Create processor for tag-based extraction across chunks
             reasoning_processor = StreamingReasoningProcessor(VERTEX_REASONING_TAG)
             chunk_count = 0
+            has_sent_content = False
             
             async for chunk in stream_response:
                 chunk_count += 1
@@ -145,20 +146,36 @@ class OpenAIDirectHandler:
                                 if processed_content or current_reasoning:
                                     print(f"DEBUG: Chunk {chunk_count} - Processed content: '{processed_content}', Reasoning: '{current_reasoning[:50]}...' if len(current_reasoning) > 50 else '{current_reasoning}'")
                                 
-                                # Update delta with processed content
+                                # Send chunks for both reasoning and content as they arrive
+                                chunks_to_send = []
+                                
+                                # If we have reasoning content, send it
                                 if current_reasoning:
-                                    delta['reasoning_content'] = current_reasoning
+                                    reasoning_chunk = chunk_as_dict.copy()
+                                    reasoning_chunk['choices'][0]['delta'] = {'reasoning_content': current_reasoning}
+                                    chunks_to_send.append(reasoning_chunk)
+                                
+                                # If we have regular content, send it
                                 if processed_content:
-                                    delta['content'] = processed_content
-                                elif 'content' in delta:
-                                    del delta['content']
-                    
-                    yield f"data: {json.dumps(chunk_as_dict)}\n\n"
+                                    content_chunk = chunk_as_dict.copy()
+                                    content_chunk['choices'][0]['delta'] = {'content': processed_content}
+                                    chunks_to_send.append(content_chunk)
+                                    has_sent_content = True
+                                
+                                # Send all chunks
+                                for chunk_to_send in chunks_to_send:
+                                    yield f"data: {json.dumps(chunk_to_send)}\n\n"
+                            else:
+                                # Still yield the chunk even if no content (could have other delta fields)
+                                yield f"data: {json.dumps(chunk_as_dict)}\n\n"
+                    else:
+                        # Yield chunks without choices too (they might contain metadata)
+                        yield f"data: {json.dumps(chunk_as_dict)}\n\n"
 
                 except Exception as chunk_error:
                     error_msg = f"Error processing OpenAI chunk for {request.model}: {str(chunk_error)}"
                     print(f"ERROR: {error_msg}")
-                    if len(error_msg) > 1024: 
+                    if len(error_msg) > 1024:
                         error_msg = error_msg[:1024] + "..."
                     error_response = create_openai_error_response(500, error_msg, "server_error")
                     yield f"data: {json.dumps(error_response)}\n\n"
@@ -173,6 +190,19 @@ class OpenAIDirectHandler:
             # Flush any remaining buffered content
             remaining_content, remaining_reasoning = reasoning_processor.flush_remaining()
             
+            # Send any remaining reasoning first
+            if remaining_reasoning:
+                print(f"DEBUG: Flushing remaining reasoning: '{remaining_reasoning[:50]}...' if len(remaining_reasoning) > 50 else '{remaining_reasoning}'")
+                reasoning_chunk = {
+                    "id": f"chatcmpl-{int(time.time())}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": request.model,
+                    "choices": [{"index": 0, "delta": {"reasoning_content": remaining_reasoning}, "finish_reason": None}]
+                }
+                yield f"data: {json.dumps(reasoning_chunk)}\n\n"
+            
+            # Send any remaining content
             if remaining_content:
                 print(f"DEBUG: Flushing remaining content: '{remaining_content}'")
                 final_chunk = {
@@ -183,25 +213,23 @@ class OpenAIDirectHandler:
                     "choices": [{"index": 0, "delta": {"content": remaining_content}, "finish_reason": None}]
                 }
                 yield f"data: {json.dumps(final_chunk)}\n\n"
-                
-                # Send a proper finish reason chunk
-                finish_chunk = {
-                    "id": f"chatcmpl-{int(time.time())}",
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": request.model,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-                }
-                yield f"data: {json.dumps(finish_chunk)}\n\n"
+                has_sent_content = True
             
-            # Note: remaining_reasoning is not used here since incomplete reasoning
-            # is treated as regular content when tags are unclosed
+            # Always send a finish reason chunk
+            finish_chunk = {
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": request.model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+            }
+            yield f"data: {json.dumps(finish_chunk)}\n\n"
             
             yield "data: [DONE]\n\n"
             
         except Exception as stream_error:
             error_msg = str(stream_error)
-            if len(error_msg) > 1024: 
+            if len(error_msg) > 1024:
                 error_msg = error_msg[:1024] + "..."
             error_msg_full = f"Error during OpenAI streaming for {request.model}: {error_msg}"
             print(f"ERROR: {error_msg_full}")
