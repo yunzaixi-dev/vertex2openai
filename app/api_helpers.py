@@ -465,10 +465,10 @@ async def openai_fake_stream_generator( # Reverted signature: removed thought_ta
             print(f"INFO: OpenAI Direct Fake-Streaming - Applying tag extraction with fixed marker: '{VERTEX_REASONING_TAG}'")
             # Unconditionally attempt extraction with the fixed tag
             reasoning_text, actual_content_text = extract_reasoning_by_tags(actual_content_text, VERTEX_REASONING_TAG)
-            if reasoning_text:
-                 print(f"DEBUG: Tag extraction success (fixed tag). Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content_text)}")
-            else:
-                 print(f"DEBUG: No content found within fixed tag '{VERTEX_REASONING_TAG}'.")
+            # if reasoning_text:
+            #      print(f"DEBUG: Tag extraction success (fixed tag). Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content_text)}")
+            # else:
+            #      print(f"DEBUG: No content found within fixed tag '{VERTEX_REASONING_TAG}'.")
         else:
              print(f"WARNING: OpenAI Direct Fake-Streaming - No initial content found in message.")
              actual_content_text = "" # Ensure empty string

@@ -138,13 +138,13 @@ class OpenAIDirectHandler:
                             
                             content = delta.get('content', '')
                             if content:
-                                print(f"DEBUG: Chunk {chunk_count} - Raw content: '{content}'")
+                                # print(f"DEBUG: Chunk {chunk_count} - Raw content: '{content}'")
                                 # Use the processor to extract reasoning
                                 processed_content, current_reasoning = reasoning_processor.process_chunk(content)
                                 
                                 # Debug logging for processing results
-                                if processed_content or current_reasoning:
-                                    print(f"DEBUG: Chunk {chunk_count} - Processed content: '{processed_content}', Reasoning: '{current_reasoning[:50]}...' if len(current_reasoning) > 50 else '{current_reasoning}'")
+                                # if processed_content or current_reasoning:
+                                #     print(f"DEBUG: Chunk {chunk_count} - Processed content: '{processed_content}', Reasoning: '{current_reasoning[:50]}...' if len(current_reasoning) > 50 else '{current_reasoning}'")
                                 
                                 # Send chunks for both reasoning and content as they arrive
                                 chunks_to_send = []
@@ -183,16 +183,16 @@ class OpenAIDirectHandler:
                     return
             
             # Debug logging for buffer state and chunk count
-            print(f"DEBUG: Stream ended after {chunk_count} chunks. Buffer state - tag_buffer: '{reasoning_processor.tag_buffer}', "
-                  f"inside_tag: {reasoning_processor.inside_tag}, "
-                  f"reasoning_buffer: '{reasoning_processor.reasoning_buffer[:50]}...' if reasoning_processor.reasoning_buffer else ''")
+            # print(f"DEBUG: Stream ended after {chunk_count} chunks. Buffer state - tag_buffer: '{reasoning_processor.tag_buffer}', "
+            #       f"inside_tag: {reasoning_processor.inside_tag}, "
+            #       f"reasoning_buffer: '{reasoning_processor.reasoning_buffer[:50]}...' if reasoning_processor.reasoning_buffer else ''")
             
             # Flush any remaining buffered content
             remaining_content, remaining_reasoning = reasoning_processor.flush_remaining()
             
             # Send any remaining reasoning first
             if remaining_reasoning:
-                print(f"DEBUG: Flushing remaining reasoning: '{remaining_reasoning[:50]}...' if len(remaining_reasoning) > 50 else '{remaining_reasoning}'")
+                # print(f"DEBUG: Flushing remaining reasoning: '{remaining_reasoning[:50]}...' if len(remaining_reasoning) > 50 else '{remaining_reasoning}'")
                 reasoning_chunk = {
                     "id": f"chatcmpl-{int(time.time())}",
                     "object": "chat.completion.chunk",
@@ -204,7 +204,7 @@ class OpenAIDirectHandler:
             
             # Send any remaining content
             if remaining_content:
-                print(f"DEBUG: Flushing remaining content: '{remaining_content}'")
+                # print(f"DEBUG: Flushing remaining content: '{remaining_content}'")
                 final_chunk = {
                     "id": f"chatcmpl-{int(time.time())}",
                     "object": "chat.completion.chunk",
@@ -273,9 +273,9 @@ class OpenAIDirectHandler:
                             message_dict['content'] = actual_content
                             if reasoning_text:
                                 message_dict['reasoning_content'] = reasoning_text
-                                print(f"DEBUG: Tag extraction success. Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content)}")
-                            else:
-                                print(f"DEBUG: No content found within fixed tag '{VERTEX_REASONING_TAG}'.")
+                                # print(f"DEBUG: Tag extraction success. Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content)}")
+                            # else:
+                            #     print(f"DEBUG: No content found within fixed tag '{VERTEX_REASONING_TAG}'.")
                         else:
                             print(f"WARNING: OpenAI Direct Non-Streaming - No initial content found in message.")
                             message_dict['content'] = ""
