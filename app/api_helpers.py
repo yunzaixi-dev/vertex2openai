@@ -18,7 +18,6 @@ from message_processing import (
     convert_to_openai_format,
     convert_chunk_to_openai,
     create_final_chunk,
-    split_text_by_completion_tokens,
     parse_gemini_response_for_reasoning_and_content, # Added import
     extract_reasoning_by_tags # Added for new OpenAI direct reasoning logic
 )

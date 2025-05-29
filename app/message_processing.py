@@ -6,8 +6,6 @@ import urllib.parse
 from typing import List, Dict, Any, Union, Literal, Tuple # Added Tuple
 
 from google.genai import types
-from google.genai.types import HttpOptions as GenAIHttpOptions 
-from google import genai as google_genai_client 
 from models import OpenAIMessage, ContentPartText, ContentPartImage
 
 SUPPORTED_ROLES = ["user", "model"]
@@ -323,35 +321,3 @@ def create_final_chunk(model: str, response_id: str, candidate_count: int = 1) -
     choices = [{"index": i, "delta": {}, "finish_reason": "stop"} for i in range(candidate_count)]
     final_chunk_data = {"id": response_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": model, "choices": choices}
     return f"data: {json.dumps(final_chunk_data)}\n\n"
-
-def split_text_by_completion_tokens(
-    gcp_creds: Any, gcp_proj_id: str, gcp_loc: str, model_id_for_tokenizer: str,
-    full_text_to_tokenize: str, num_completion_tokens_from_usage: int
-) -> tuple[str, str, List[str]]:
-    if not full_text_to_tokenize: return "", "", []
-    try:
-        sync_tokenizer_client = google_genai_client.Client(
-            vertexai=True, credentials=gcp_creds, project=gcp_proj_id, location=gcp_loc,
-            http_options=GenAIHttpOptions(api_version="v1")
-        )
-        token_compute_response = sync_tokenizer_client.models.compute_tokens(model=model_id_for_tokenizer, contents=full_text_to_tokenize)
-        all_final_token_strings = []
-        if token_compute_response.tokens_info:
-            for token_info_item in token_compute_response.tokens_info:
-                for api_token_bytes in token_info_item.tokens:
-                    intermediate_str = api_token_bytes.decode('utf-8', errors='replace') if isinstance(api_token_bytes, bytes) else api_token_bytes
-                    final_token_text = ""
-                    try: 
-                        b64_decoded_bytes = base64.b64decode(intermediate_str)
-                        final_token_text = b64_decoded_bytes.decode('utf-8', errors='replace')
-                    except Exception: final_token_text = intermediate_str
-                    all_final_token_strings.append(final_token_text)
-        if not all_final_token_strings: return "", full_text_to_tokenize, []
-        if not (0 < num_completion_tokens_from_usage <= len(all_final_token_strings)):
-            return "", "".join(all_final_token_strings), all_final_token_strings
-        completion_part_tokens = all_final_token_strings[-num_completion_tokens_from_usage:]
-        reasoning_part_tokens = all_final_token_strings[:-num_completion_tokens_from_usage]
-        return "".join(reasoning_part_tokens), "".join(completion_part_tokens), all_final_token_strings
-    except Exception as e_tok:
-        print(f"ERROR: Tokenizer failed in split_text_by_completion_tokens: {e_tok}")
-        return "", full_text_to_tokenize, []
