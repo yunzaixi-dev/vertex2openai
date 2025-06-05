@@ -17,14 +17,16 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
     PAY_PREFIX = "[PAY]"
     # Access credential_manager from app state
     credential_manager_instance: CredentialManager = fastapi_request.app.state.credential_manager
+    express_key_manager_instance = fastapi_request.app.state.express_key_manager
 
     has_sa_creds = credential_manager_instance.get_total_credentials() > 0
-    has_express_key = bool(app_config.VERTEX_EXPRESS_API_KEY_VAL)
+    has_express_key = express_key_manager_instance.get_total_keys() > 0
 
     raw_vertex_models = await get_vertex_models()
     raw_express_models = await get_vertex_express_models()
     
     candidate_model_ids = set()
+    raw_vertex_models_set = set(raw_vertex_models)  # For checking origin during prefixing
 
     if has_express_key:
         candidate_model_ids.update(raw_express_models)
@@ -57,8 +59,12 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
     for original_model_id in sorted(list(all_model_ids)):
         current_display_prefix = ""
         # Only add PAY_PREFIX if the model is not already an EXPRESS model (which has its own prefix)
-        if not original_model_id.startswith("[EXPRESS]") and \
-           has_sa_creds and not has_express_key and EXPERIMENTAL_MARKER not in original_model_id:
+        # Apply PAY_PREFIX if SA creds are present, it's a model from raw_vertex_models,
+        # it's not experimental, and not already an EXPRESS model.
+        if has_sa_creds and \
+           original_model_id in raw_vertex_models_set and \
+           EXPERIMENTAL_MARKER not in original_model_id and \
+           not original_model_id.startswith("[EXPRESS]"):
             current_display_prefix = PAY_PREFIX
         
         base_display_id = f"{current_display_prefix}{original_model_id}"
@@ -85,7 +91,7 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
                     })
         
         # Apply special suffixes for models starting with "gemini-2.5-flash"
-        if original_model_id.startswith("gemini-2.5-flash"): # Suffix rules based on original_model_id
+        if "gemini-2.5-flash" in original_model_id: # Suffix rules based on original_model_id
             special_flash_suffixes = ["-nothinking", "-max"]
             for special_suffix in special_flash_suffixes:
                 suffixed_model_part = f"{original_model_id}{special_suffix}"

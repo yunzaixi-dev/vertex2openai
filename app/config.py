@@ -6,6 +6,10 @@ DEFAULT_PASSWORD = "123456"
 # Get password from environment variable or use default
 API_KEY = os.environ.get("API_KEY", DEFAULT_PASSWORD)
 
+# HuggingFace Authentication Settings
+HUGGINGFACE = os.environ.get("HUGGINGFACE", "false").lower() == "true"
+HUGGINGFACE_API_KEY = os.environ.get("HUGGINGFACE_API_KEY", "") # Default to empty string, auth logic will verify if HF_MODE is true and this key is needed
+
 # Directory for service account credential files
 CREDENTIALS_DIR = os.environ.get("CREDENTIALS_DIR", "/app/credentials")
 
@@ -24,6 +28,12 @@ FAKE_STREAMING_ENABLED = os.environ.get("FAKE_STREAMING", "false").lower() == "t
 FAKE_STREAMING_INTERVAL_SECONDS = float(os.environ.get("FAKE_STREAMING_INTERVAL", "1.0"))
 
 # URL for the remote JSON file containing model lists
-MODELS_CONFIG_URL = os.environ.get("MODELS_CONFIG_URL", "https://gist.githubusercontent.com/gzzhongqi/e0b684f319437a859bcf5bd6203fd1f6/raw")
+MODELS_CONFIG_URL = os.environ.get("MODELS_CONFIG_URL", "https://raw.githubusercontent.com/gzzhongqi/vertex2openai/refs/heads/main/vertexModels.json")
+
+# Constant for the Vertex reasoning tag
+VERTEX_REASONING_TAG = "vertex_think_tag"
+
+# Round-robin credential selection strategy
+ROUNDROBIN = os.environ.get("ROUNDROBIN", "false").lower() == "true"
 
 # Validation logic moved to app/auth.py
