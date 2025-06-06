@@ -87,10 +87,10 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         elif is_max_thinking_model: base_model_name = base_model_name[:-len("-max")]
         
         # Specific model variant checks (if any remain exclusive and not covered dynamically)
-        if is_nothinking_model and not base_model_name.startswith("gemini-2.5-flash"):
-            return JSONResponse(status_code=400, content=create_openai_error_response(400, f"Model '{request.model}' (-nothinking) is only supported for models starting with 'gemini-2.5-flash'.", "invalid_request_error"))
-        if is_max_thinking_model and not base_model_name.startswith("gemini-2.5-flash"):
-            return JSONResponse(status_code=400, content=create_openai_error_response(400, f"Model '{request.model}' (-max) is only supported for models starting with 'gemini-2.5-flash'.", "invalid_request_error"))
+        if is_nothinking_model and not (base_model_name.startswith("gemini-2.5-flash") or base_model_name == "gemini-2.5-pro-preview-06-05"):
+            return JSONResponse(status_code=400, content=create_openai_error_response(400, f"Model '{request.model}' (-nothinking) is only supported for models starting with 'gemini-2.5-flash' or 'gemini-2.5-pro-preview-06-05'.", "invalid_request_error"))
+        if is_max_thinking_model and not (base_model_name.startswith("gemini-2.5-flash") or base_model_name == "gemini-2.5-pro-preview-06-05"):
+            return JSONResponse(status_code=400, content=create_openai_error_response(400, f"Model '{request.model}' (-max) is only supported for models starting with 'gemini-2.5-flash' or 'gemini-2.5-pro-preview-06-05'.", "invalid_request_error"))
 
         generation_config = create_generation_config(request)
 
@@ -213,9 +213,15 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                 generation_config["system_instruction"] = ENCRYPTION_INSTRUCTIONS
                 current_prompt_func = create_encrypted_full_gemini_prompt
             elif is_nothinking_model:
-                generation_config["thinking_config"] = {"thinking_budget": 0}
+                if base_model_name == "gemini-2.5-pro-preview-06-05":
+                    generation_config["thinking_config"] = {"thinking_budget": 128}
+                else:
+                    generation_config["thinking_config"] = {"thinking_budget": 0}
             elif is_max_thinking_model:
-                generation_config["thinking_config"] = {"thinking_budget": 24576}
+                if base_model_name == "gemini-2.5-pro-preview-06-05":
+                    generation_config["thinking_config"] = {"thinking_budget": 32768}
+                else:
+                    generation_config["thinking_config"] = {"thinking_budget": 24576}
             
             # For non-auto models, the 'base_model_name' might have suffix stripped.
             # We should use the original 'request.model' for API call if it's a suffixed one,
