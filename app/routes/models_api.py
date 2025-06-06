@@ -90,10 +90,10 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
                         "permission": [], "root": original_model_id, "parent": None
                     })
         
-        # Apply special suffixes for models starting with "gemini-2.5-flash"
-        if "gemini-2.5-flash" in original_model_id: # Suffix rules based on original_model_id
-            special_flash_suffixes = ["-nothinking", "-max"]
-            for special_suffix in special_flash_suffixes:
+        # Apply special suffixes for models starting with "gemini-2.5-flash" or specifically "gemini-2.5-pro-preview-06-05"
+        if "gemini-2.5-flash" in original_model_id or original_model_id == "gemini-2.5-pro-preview-06-05": # Suffix rules based on original_model_id
+            special_thinking_suffixes = ["-nothinking", "-max"]
+            for special_suffix in special_thinking_suffixes:
                 suffixed_model_part = f"{original_model_id}{special_suffix}"
                 final_special_suffixed_display_id = f"{current_display_prefix}{suffixed_model_part}"
 
