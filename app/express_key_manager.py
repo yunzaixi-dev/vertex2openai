@@ -18,14 +18,10 @@ class ExpressKeyManager:
         """Get the total number of available Express API keys."""
         return len(self.express_keys)
     
-    def _get_key_with_index(self, key: str, index: int) -> Tuple[str, int]:
-        """Return a tuple of (key, original_index) for logging purposes."""
-        return (key, index)
-    
-    def get_random_express_key(self) -> Optional[Tuple[str, int]]:
+    def get_random_express_key(self) -> Optional[Tuple[int, str]]:
         """
         Get a random Express API key.
-        Returns (key, original_index) tuple or None if no keys available.
+        Returns (original_index, key) tuple or None if no keys available.
         """
         if not self.express_keys:
             print("WARNING: No Express API keys available for selection.")
@@ -40,12 +36,12 @@ class ExpressKeyManager:
         
         # Return the first key (which is random due to shuffle)
         original_idx, key = indexed_keys[0]
-        return self._get_key_with_index(key, original_idx)
+        return (original_idx, key)
     
-    def get_roundrobin_express_key(self) -> Optional[Tuple[str, int]]:
+    def get_roundrobin_express_key(self) -> Optional[Tuple[int, str]]:
         """
         Get an Express API key using round-robin selection.
-        Returns (key, original_index) tuple or None if no keys available.
+        Returns (original_index, key) tuple or None if no keys available.
         """
         if not self.express_keys:
             print("WARNING: No Express API keys available for selection.")
@@ -64,13 +60,13 @@ class ExpressKeyManager:
         # Move to next index for next call
         self.round_robin_index = (self.round_robin_index + 1) % len(self.express_keys)
         
-        return self._get_key_with_index(key, original_idx)
+        return (original_idx, key)
     
-    def get_express_api_key(self) -> Optional[Tuple[str, int]]:
+    def get_express_api_key(self) -> Optional[Tuple[int, str]]:
         """
         Get an Express API key based on the configured selection strategy.
         Checks ROUNDROBIN config and calls the appropriate method.
-        Returns (key, original_index) tuple or None if no keys available.
+        Returns (original_index, key) tuple or None if no keys available.
         """
         if app_config.ROUNDROBIN:
             return self.get_roundrobin_express_key()

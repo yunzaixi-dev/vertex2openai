@@ -18,7 +18,6 @@ from message_processing import (
     convert_to_openai_format,
     convert_chunk_to_openai,
     create_final_chunk,
-    split_text_by_completion_tokens,
     parse_gemini_response_for_reasoning_and_content, # Added import
     extract_reasoning_by_tags # Added for new OpenAI direct reasoning logic
 )
@@ -35,6 +34,7 @@ class StreamingReasoningProcessor:
         self.tag_buffer = ""
         self.inside_tag = False
         self.reasoning_buffer = ""
+        self.partial_tag_buffer = ""  # Buffer for potential partial tags
     
     def process_chunk(self, content: str) -> tuple[str, str]:
         """
@@ -46,9 +46,14 @@ class StreamingReasoningProcessor:
         Returns:
             A tuple of:
             - processed_content: Content with reasoning tags removed
-            - current_reasoning: Complete reasoning text if a closing tag was found
+            - current_reasoning: Reasoning text found in this chunk (partial or complete)
         """
-        # Add new content to buffer
+        # Add new content to buffer, but also handle any partial tag from before
+        if self.partial_tag_buffer:
+            # We had a partial tag from the previous chunk
+            content = self.partial_tag_buffer + content
+            self.partial_tag_buffer = ""
+        
         self.tag_buffer += content
         
         processed_content = ""
@@ -59,12 +64,27 @@ class StreamingReasoningProcessor:
                 # Look for opening tag
                 open_pos = self.tag_buffer.find(self.open_tag)
                 if open_pos == -1:
-                    # No opening tag found
-                    if len(self.tag_buffer) >= len(self.open_tag):
-                        # Safe to output all but the last few chars (in case tag is split)
-                        safe_length = len(self.tag_buffer) - len(self.open_tag) + 1
-                        processed_content += self.tag_buffer[:safe_length]
-                        self.tag_buffer = self.tag_buffer[safe_length:]
+                    # No complete opening tag found
+                    # Check if we might have a partial tag at the end
+                    partial_match = False
+                    for i in range(1, min(len(self.open_tag), len(self.tag_buffer) + 1)):
+                        if self.tag_buffer[-i:] == self.open_tag[:i]:
+                            partial_match = True
+                            # Output everything except the potential partial tag
+                            if len(self.tag_buffer) > i:
+                                processed_content += self.tag_buffer[:-i]
+                                self.partial_tag_buffer = self.tag_buffer[-i:]
+                                self.tag_buffer = ""
+                            else:
+                                # Entire buffer is partial tag
+                                self.partial_tag_buffer = self.tag_buffer
+                                self.tag_buffer = ""
+                            break
+                    
+                    if not partial_match:
+                        # No partial tag, output everything
+                        processed_content += self.tag_buffer
+                        self.tag_buffer = ""
                     break
                 else:
                     # Found opening tag
@@ -75,22 +95,84 @@ class StreamingReasoningProcessor:
                 # Inside tag, look for closing tag
                 close_pos = self.tag_buffer.find(self.close_tag)
                 if close_pos == -1:
-                    # No closing tag yet
-                    if len(self.tag_buffer) >= len(self.close_tag):
-                        # Safe to add to reasoning buffer
-                        safe_length = len(self.tag_buffer) - len(self.close_tag) + 1
-                        self.reasoning_buffer += self.tag_buffer[:safe_length]
-                        self.tag_buffer = self.tag_buffer[safe_length:]
+                    # No complete closing tag yet
+                    # Check for partial closing tag
+                    partial_match = False
+                    for i in range(1, min(len(self.close_tag), len(self.tag_buffer) + 1)):
+                        if self.tag_buffer[-i:] == self.close_tag[:i]:
+                            partial_match = True
+                            # Add everything except potential partial tag to reasoning
+                            if len(self.tag_buffer) > i:
+                                new_reasoning = self.tag_buffer[:-i]
+                                self.reasoning_buffer += new_reasoning
+                                if new_reasoning:  # Stream reasoning as it arrives
+                                    current_reasoning = new_reasoning
+                                self.partial_tag_buffer = self.tag_buffer[-i:]
+                                self.tag_buffer = ""
+                            else:
+                                # Entire buffer is partial tag
+                                self.partial_tag_buffer = self.tag_buffer
+                                self.tag_buffer = ""
+                            break
+                    
+                    if not partial_match:
+                        # No partial tag, add all to reasoning and stream it
+                        if self.tag_buffer:
+                            self.reasoning_buffer += self.tag_buffer
+                            current_reasoning = self.tag_buffer
+                            self.tag_buffer = ""
                     break
                 else:
                     # Found closing tag
-                    self.reasoning_buffer += self.tag_buffer[:close_pos]
-                    current_reasoning = self.reasoning_buffer
-                    self.reasoning_buffer = ""
+                    final_reasoning_chunk = self.tag_buffer[:close_pos]
+                    self.reasoning_buffer += final_reasoning_chunk
+                    if final_reasoning_chunk:  # Include the last chunk of reasoning
+                        current_reasoning = final_reasoning_chunk
+                    self.reasoning_buffer = ""  # Clear buffer after complete tag
                     self.tag_buffer = self.tag_buffer[close_pos + len(self.close_tag):]
                     self.inside_tag = False
         
         return processed_content, current_reasoning
+    
+    def flush_remaining(self) -> tuple[str, str]:
+        """
+        Flush any remaining content in the buffer when the stream ends.
+        
+        Returns:
+            A tuple of:
+            - remaining_content: Any content that was buffered but not yet output
+            - remaining_reasoning: Any incomplete reasoning if we were inside a tag
+        """
+        remaining_content = ""
+        remaining_reasoning = ""
+        
+        # First handle any partial tag buffer
+        if self.partial_tag_buffer:
+            # The partial tag wasn't completed, so treat it as regular content
+            remaining_content += self.partial_tag_buffer
+            self.partial_tag_buffer = ""
+        
+        if not self.inside_tag:
+            # If we're not inside a tag, output any remaining buffer
+            if self.tag_buffer:
+                remaining_content += self.tag_buffer
+                self.tag_buffer = ""
+        else:
+            # If we're inside a tag when stream ends, we have incomplete reasoning
+            # First, yield any reasoning we've accumulated
+            if self.reasoning_buffer:
+                remaining_reasoning = self.reasoning_buffer
+                self.reasoning_buffer = ""
+            
+            # Then output the remaining buffer as content (it's an incomplete tag)
+            if self.tag_buffer:
+                # Don't include the opening tag in output - just the buffer content
+                remaining_content += self.tag_buffer
+                self.tag_buffer = ""
+            
+            self.inside_tag = False
+        
+        return remaining_content, remaining_reasoning
 
 
 def process_streaming_content_with_reasoning_tags(
@@ -383,10 +465,10 @@ async def openai_fake_stream_generator( # Reverted signature: removed thought_ta
             print(f"INFO: OpenAI Direct Fake-Streaming - Applying tag extraction with fixed marker: '{VERTEX_REASONING_TAG}'")
             # Unconditionally attempt extraction with the fixed tag
             reasoning_text, actual_content_text = extract_reasoning_by_tags(actual_content_text, VERTEX_REASONING_TAG)
-            if reasoning_text:
-                 print(f"DEBUG: Tag extraction success (fixed tag). Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content_text)}")
-            else:
-                 print(f"DEBUG: No content found within fixed tag '{VERTEX_REASONING_TAG}'.")
+            # if reasoning_text:
+            #      print(f"DEBUG: Tag extraction success (fixed tag). Reasoning len: {len(reasoning_text)}, Content len: {len(actual_content_text)}")
+            # else:
+            #      print(f"DEBUG: No content found within fixed tag '{VERTEX_REASONING_TAG}'.")
         else:
              print(f"WARNING: OpenAI Direct Fake-Streaming - No initial content found in message.")
              actual_content_text = "" # Ensure empty string
