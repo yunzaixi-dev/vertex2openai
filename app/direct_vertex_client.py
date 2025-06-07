@@ -111,21 +111,115 @@ class DirectVertexClient:
             print(f"ERROR: Failed to discover project ID: {e}")
             raise
     
-    def _convert_sdk_to_dict(self, obj: Any) -> Any:
-        """Convert SDK objects to dictionaries for JSON serialization"""
-        if hasattr(obj, '__dict__'):
-            # Handle SDK objects with __dict__
+    def _convert_contents(self, contents: Any) -> List[Dict[str, Any]]:
+        """Convert SDK Content objects to REST API format"""
+        if isinstance(contents, list):
+            return [self._convert_content_item(item) for item in contents]
+        else:
+            return [self._convert_content_item(contents)]
+    
+    def _convert_content_item(self, content: Any) -> Dict[str, Any]:
+        """Convert a single content item to REST API format"""
+        if isinstance(content, dict):
+            return content
+        
+        # Handle SDK Content objects
+        result = {}
+        if hasattr(content, 'role'):
+            result['role'] = content.role
+        if hasattr(content, 'parts'):
+            result['parts'] = []
+            for part in content.parts:
+                if isinstance(part, dict):
+                    result['parts'].append(part)
+                elif hasattr(part, 'text'):
+                    result['parts'].append({'text': part.text})
+                elif hasattr(part, 'inline_data'):
+                    result['parts'].append({
+                        'inline_data': {
+                            'mime_type': part.inline_data.mime_type,
+                            'data': part.inline_data.data
+                        }
+                    })
+        return result
+    
+    def _convert_safety_settings(self, safety_settings: Any) -> List[Dict[str, str]]:
+        """Convert SDK SafetySetting objects to REST API format"""
+        if not safety_settings:
+            return []
+        
+        result = []
+        for setting in safety_settings:
+            if isinstance(setting, dict):
+                result.append(setting)
+            elif hasattr(setting, 'category') and hasattr(setting, 'threshold'):
+                # Convert SDK SafetySetting to dict
+                result.append({
+                    'category': setting.category,
+                    'threshold': setting.threshold
+                })
+        return result
+    
+    def _convert_tools(self, tools: Any) -> List[Dict[str, Any]]:
+        """Convert SDK Tool objects to REST API format"""
+        if not tools:
+            return []
+        
+        result = []
+        for tool in tools:
+            if isinstance(tool, dict):
+                result.append(tool)
+            else:
+                # Convert SDK Tool object to dict
+                result.append(self._convert_tool_item(tool))
+        return result
+    
+    def _convert_tool_item(self, tool: Any) -> Dict[str, Any]:
+        """Convert a single tool item to REST API format"""
+        if isinstance(tool, dict):
+            return tool
+        
+        tool_dict = {}
+        
+        # Convert all non-private attributes
+        if hasattr(tool, '__dict__'):
+            for attr_name, attr_value in tool.__dict__.items():
+                if not attr_name.startswith('_'):
+                    # Convert attribute names from snake_case to camelCase for REST API
+                    rest_api_name = self._to_camel_case(attr_name)
+                    
+                    # Special handling for known types
+                    if attr_name == 'google_search' and attr_value is not None:
+                        tool_dict[rest_api_name] = {}  # GoogleSearch is empty object in REST
+                    elif attr_name == 'function_declarations' and attr_value is not None:
+                        tool_dict[rest_api_name] = attr_value
+                    elif attr_value is not None:
+                        # Recursively convert any other SDK objects
+                        tool_dict[rest_api_name] = self._convert_sdk_object(attr_value)
+        
+        return tool_dict
+    
+    def _to_camel_case(self, snake_str: str) -> str:
+        """Convert snake_case to camelCase"""
+        components = snake_str.split('_')
+        return components[0] + ''.join(x.title() for x in components[1:])
+    
+    def _convert_sdk_object(self, obj: Any) -> Any:
+        """Generic SDK object converter"""
+        if isinstance(obj, (str, int, float, bool, type(None))):
+            return obj
+        elif isinstance(obj, dict):
+            return {k: self._convert_sdk_object(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._convert_sdk_object(item) for item in obj]
+        elif hasattr(obj, '__dict__'):
+            # Convert SDK object to dict
             result = {}
             for key, value in obj.__dict__.items():
-                if not key.startswith('_'):  # Skip private attributes
-                    result[key] = self._convert_sdk_to_dict(value)
+                if not key.startswith('_'):
+                    result[self._to_camel_case(key)] = self._convert_sdk_object(value)
             return result
-        elif isinstance(obj, list):
-            return [self._convert_sdk_to_dict(item) for item in obj]
-        elif isinstance(obj, dict):
-            return {key: self._convert_sdk_to_dict(value) for key, value in obj.items()}
         else:
-            # Return primitive types as-is
             return obj
     
     async def _generate_content(self, model: str, contents: Any, config: Dict[str, Any], stream: bool = False) -> Any:
@@ -139,21 +233,24 @@ class DirectVertexClient:
         endpoint = "streamGenerateContent" if stream else "generateContent"
         url = f"{self.base_url}/projects/{self.project_id}/locations/global/publishers/google/models/{model}:{endpoint}?key={self.api_key}"
         
-        # Convert SDK objects to dictionaries for JSON serialization
-        # The contents might be SDK Content objects that need conversion
+        # Convert contents to REST API format
         payload = {
-            "contents": self._convert_sdk_to_dict(contents)
+            "contents": self._convert_contents(contents)
         }
         
-        # Extract specific config sections and convert SDK objects
+        # Extract specific config sections
         if "system_instruction" in config:
-            payload["systemInstruction"] = self._convert_sdk_to_dict(config["system_instruction"])
+            # System instruction should be a content object
+            if isinstance(config["system_instruction"], dict):
+                payload["systemInstruction"] = config["system_instruction"]
+            else:
+                payload["systemInstruction"] = self._convert_content_item(config["system_instruction"])
         
         if "safety_settings" in config:
-            payload["safetySettings"] = self._convert_sdk_to_dict(config["safety_settings"])
+            payload["safetySettings"] = self._convert_safety_settings(config["safety_settings"])
         
         if "tools" in config:
-            payload["tools"] = self._convert_sdk_to_dict(config["tools"])
+            payload["tools"] = self._convert_tools(config["tools"])
         
         # All other config goes under generationConfig
         generation_config = {}
@@ -214,21 +311,24 @@ class DirectVertexClient:
         # Build URL for streaming
         url = f"{self.base_url}/projects/{self.project_id}/locations/global/publishers/google/models/{model}:streamGenerateContent?key={self.api_key}"
         
-        # Convert SDK objects to dictionaries for JSON serialization
-        # The contents might be SDK Content objects that need conversion
+        # Convert contents to REST API format
         payload = {
-            "contents": self._convert_sdk_to_dict(contents)
+            "contents": self._convert_contents(contents)
         }
         
-        # Extract specific config sections and convert SDK objects
+        # Extract specific config sections
         if "system_instruction" in config:
-            payload["systemInstruction"] = self._convert_sdk_to_dict(config["system_instruction"])
+            # System instruction should be a content object
+            if isinstance(config["system_instruction"], dict):
+                payload["systemInstruction"] = config["system_instruction"]
+            else:
+                payload["systemInstruction"] = self._convert_content_item(config["system_instruction"])
         
         if "safety_settings" in config:
-            payload["safetySettings"] = self._convert_sdk_to_dict(config["safety_settings"])
+            payload["safetySettings"] = self._convert_safety_settings(config["safety_settings"])
         
         if "tools" in config:
-            payload["tools"] = self._convert_sdk_to_dict(config["tools"])
+            payload["tools"] = self._convert_tools(config["tools"])
         
         # All other config goes under generationConfig
         generation_config = {}
