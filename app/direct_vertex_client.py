@@ -111,6 +111,22 @@ class DirectVertexClient:
             print(f"ERROR: Failed to discover project ID: {e}")
             raise
     
+    def _convert_sdk_to_dict(self, obj: Any) -> Any:
+        """Convert SDK objects to dictionaries for JSON serialization"""
+        if hasattr(obj, '__dict__'):
+            # Handle SDK objects with __dict__
+            result = {}
+            for key, value in obj.__dict__.items():
+                if not key.startswith('_'):  # Skip private attributes
+                    result[key] = self._convert_sdk_to_dict(value)
+            return result
+        elif isinstance(obj, list):
+            return [self._convert_sdk_to_dict(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {key: self._convert_sdk_to_dict(value) for key, value in obj.items()}
+        else:
+            # Return primitive types as-is
+            return obj
     
     async def _generate_content(self, model: str, contents: Any, config: Dict[str, Any], stream: bool = False) -> Any:
         """Internal method for content generation"""
@@ -123,21 +139,21 @@ class DirectVertexClient:
         endpoint = "streamGenerateContent" if stream else "generateContent"
         url = f"{self.base_url}/projects/{self.project_id}/locations/global/publishers/google/models/{model}:{endpoint}?key={self.api_key}"
         
-        # The contents and config are already in the correct format
-        # But config parameters need to be nested under generationConfig for the REST API
+        # Convert SDK objects to dictionaries for JSON serialization
+        # The contents might be SDK Content objects that need conversion
         payload = {
-            "contents": contents
+            "contents": self._convert_sdk_to_dict(contents)
         }
         
-        # Extract specific config sections
+        # Extract specific config sections and convert SDK objects
         if "system_instruction" in config:
-            payload["systemInstruction"] = config["system_instruction"]
+            payload["systemInstruction"] = self._convert_sdk_to_dict(config["system_instruction"])
         
         if "safety_settings" in config:
-            payload["safetySettings"] = config["safety_settings"]
+            payload["safetySettings"] = self._convert_sdk_to_dict(config["safety_settings"])
         
         if "tools" in config:
-            payload["tools"] = config["tools"]
+            payload["tools"] = self._convert_sdk_to_dict(config["tools"])
         
         # All other config goes under generationConfig
         generation_config = {}
@@ -198,21 +214,21 @@ class DirectVertexClient:
         # Build URL for streaming
         url = f"{self.base_url}/projects/{self.project_id}/locations/global/publishers/google/models/{model}:streamGenerateContent?key={self.api_key}"
         
-        # The contents and config are already in the correct format
-        # But config parameters need to be nested under generationConfig for the REST API
+        # Convert SDK objects to dictionaries for JSON serialization
+        # The contents might be SDK Content objects that need conversion
         payload = {
-            "contents": contents
+            "contents": self._convert_sdk_to_dict(contents)
         }
         
-        # Extract specific config sections
+        # Extract specific config sections and convert SDK objects
         if "system_instruction" in config:
-            payload["systemInstruction"] = config["system_instruction"]
+            payload["systemInstruction"] = self._convert_sdk_to_dict(config["system_instruction"])
         
         if "safety_settings" in config:
-            payload["safetySettings"] = config["safety_settings"]
+            payload["safetySettings"] = self._convert_sdk_to_dict(config["safety_settings"])
         
         if "tools" in config:
-            payload["tools"] = config["tools"]
+            payload["tools"] = self._convert_sdk_to_dict(config["tools"])
         
         # All other config goes under generationConfig
         generation_config = {}
