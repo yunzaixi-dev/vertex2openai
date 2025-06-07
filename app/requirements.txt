@@ -7,3 +7,4 @@ google-genai==1.17.0
 httpx>=0.25.0
 openai
 google-auth-oauthlib
+aiohttp
