@@ -39,8 +39,10 @@ class DirectVertexClient:
                 """Non-streaming content generation"""
                 return await self.parent._generate_content(model, contents, config, stream=False)
             
-            def generate_content_stream(self, model: str, contents: Any, config: Dict[str, Any]):
-                """Streaming content generation - returns an awaitable that yields an async generator"""
+            async def generate_content_stream(self, model: str, contents: Any, config: Dict[str, Any]):
+                """Streaming content generation - returns an async generator"""
+                # This needs to be an async method that returns the generator
+                # to match the SDK's interface where you await the method call
                 return self.parent._generate_content_stream(model, contents, config)
     
     async def _ensure_session(self):
@@ -225,7 +227,10 @@ class DirectVertexClient:
             async with self.session.post(url, json=payload) as response:
                 if response.status != 200:
                     error_data = await response.json()
-                    error_msg = error_data.get("error", {}).get("message", f"HTTP {response.status}")
+                    # Handle array response format
+                    if isinstance(error_data, list) and len(error_data) > 0:
+                        error_data = error_data[0]
+                    error_msg = error_data.get("error", {}).get("message", f"HTTP {response.status}") if isinstance(error_data, dict) else str(error_data)
                     raise Exception(f"Vertex AI API error: {error_msg}")
                 
                 # The Vertex AI streaming endpoint returns Server-Sent Events
