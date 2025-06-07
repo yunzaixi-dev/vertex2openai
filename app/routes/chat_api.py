@@ -24,6 +24,7 @@ from api_helpers import (
     execute_gemini_call,
 )
 from openai_handler import OpenAIDirectHandler
+from direct_vertex_client import DirectVertexClient
 
 router = APIRouter()
 
@@ -115,8 +116,14 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                 if key_tuple:
                     original_idx, key_val = key_tuple
                     try:
-                        client_to_use = genai.Client(vertexai=True, api_key=key_val)
-                        print(f"INFO: Attempt {attempt+1}/{total_keys} - Using Vertex Express Mode for model {request.model} (base: {base_model_name}) with API key (original index: {original_idx}).")
+                        # Check if model contains "gemini-2.5-pro" for direct URL approach
+                        if "gemini-2.5-pro" in base_model_name:
+                            client_to_use = DirectVertexClient(api_key=key_val)
+                            await client_to_use.discover_project_id()
+                            print(f"INFO: Attempt {attempt+1}/{total_keys} - Using DirectVertexClient for model {request.model} (base: {base_model_name}) with API key (original index: {original_idx}).")
+                        else:
+                            client_to_use = genai.Client(vertexai=True, api_key=key_val)
+                            print(f"INFO: Attempt {attempt+1}/{total_keys} - Using Vertex Express Mode SDK for model {request.model} (base: {base_model_name}) with API key (original index: {original_idx}).")
                         break # Successfully initialized client
                     except Exception as e:
                         print(f"WARNING: Attempt {attempt+1}/{total_keys} - Vertex Express Mode client init failed for API key (original index: {original_idx}) for model {request.model}: {e}. Trying next key.")
@@ -177,7 +184,11 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                 current_gen_config = attempt["config_modifier"](generation_config.copy())
                 try:
                     # Pass is_auto_attempt=True for auto-mode calls
-                    return await execute_gemini_call(client_to_use, attempt["model"], attempt["prompt_func"], current_gen_config, request, is_auto_attempt=True)
+                    result = await execute_gemini_call(client_to_use, attempt["model"], attempt["prompt_func"], current_gen_config, request, is_auto_attempt=True)
+                    # Clean up DirectVertexClient session if used
+                    if isinstance(client_to_use, DirectVertexClient):
+                        await client_to_use.close()
+                    return result
                 except Exception as e_auto:
                     last_err = e_auto
                     print(f"Auto-attempt '{attempt['name']}' for model {attempt['model']} failed: {e_auto}")
@@ -185,6 +196,9 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
             
             print(f"All auto attempts failed. Last error: {last_err}")
             err_msg = f"All auto-mode attempts failed for model {request.model}. Last error: {str(last_err)}"
+            # Clean up DirectVertexClient session if used
+            if isinstance(client_to_use, DirectVertexClient):
+                await client_to_use.close()
             if not request.stream and last_err:
                  return JSONResponse(status_code=500, content=create_openai_error_response(500, err_msg, "server_error"))
             elif request.stream:
@@ -231,9 +245,17 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
             # but the API call might need the full "gemini-1.5-pro-search".
             # Let's use `request.model` for the API call here, and `base_model_name` for checks like Express eligibility.
             # For non-auto mode, is_auto_attempt defaults to False in execute_gemini_call
-            return await execute_gemini_call(client_to_use, base_model_name, current_prompt_func, generation_config, request)
+            try:
+                return await execute_gemini_call(client_to_use, base_model_name, current_prompt_func, generation_config, request)
+            finally:
+                # Clean up DirectVertexClient session if used
+                if isinstance(client_to_use, DirectVertexClient):
+                    await client_to_use.close()
 
     except Exception as e:
         error_msg = f"Unexpected error in chat_completions endpoint: {str(e)}"
         print(error_msg)
+        # Clean up DirectVertexClient session if it exists
+        if 'client_to_use' in locals() and isinstance(client_to_use, DirectVertexClient):
+            await client_to_use.close()
         return JSONResponse(status_code=500, content=create_openai_error_response(500, error_msg, "server_error"))
