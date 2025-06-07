@@ -248,13 +248,28 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
 
 def is_gemini_response_valid(response: Any) -> bool:
     if response is None: return False
-    if hasattr(response, 'text') and isinstance(response.text, str) and response.text.strip(): return True
+    
+    # Check for direct text attribute (SDK response)
+    if hasattr(response, 'text') and isinstance(response.text, str) and response.text.strip():
+        return True
+    
+    # Check for candidates (both SDK and DirectVertexClient responses)
     if hasattr(response, 'candidates') and response.candidates:
         for candidate in response.candidates:
-            if hasattr(candidate, 'text') and isinstance(candidate.text, str) and candidate.text.strip(): return True
+            # Check for direct text on candidate
+            if hasattr(candidate, 'text') and isinstance(candidate.text, str) and candidate.text.strip():
+                return True
+            
+            # Check for content with parts
             if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts') and candidate.content.parts:
-                for part_item in candidate.content.parts: 
-                    if hasattr(part_item, 'text') and isinstance(part_item.text, str) and part_item.text.strip(): return True
+                for part_item in candidate.content.parts:
+                    # Check if part has text (handle both SDK and AttrDict)
+                    if hasattr(part_item, 'text'):
+                        # AttrDict might have empty string instead of None
+                        part_text = getattr(part_item, 'text', None)
+                        if part_text is not None and isinstance(part_text, str) and part_text.strip():
+                            return True
+    
     return False
 
 async def _base_fake_stream_engine(
@@ -581,6 +596,27 @@ async def execute_gemini_call(
                 block_msg+=f" ({response_obj_call.prompt_feedback.block_reason_message})"
             raise ValueError(block_msg)
         
-        if not is_gemini_response_valid(response_obj_call): 
-            raise ValueError(f"Invalid non-streaming Gemini response for model string '{model_to_call}'. Resp: {str(response_obj_call)[:200]}")
+        if not is_gemini_response_valid(response_obj_call):
+            # Create a more informative error message
+            error_details = f"Invalid non-streaming Gemini response for model string '{model_to_call}'. "
+            
+            # Try to extract useful information from the response
+            if hasattr(response_obj_call, 'candidates'):
+                error_details += f"Candidates: {len(response_obj_call.candidates) if response_obj_call.candidates else 0}. "
+                if response_obj_call.candidates and len(response_obj_call.candidates) > 0:
+                    candidate = response_obj_call.candidates[0]
+                    if hasattr(candidate, 'content'):
+                        error_details += "Has content. "
+                        if hasattr(candidate.content, 'parts'):
+                            error_details += f"Parts: {len(candidate.content.parts) if candidate.content.parts else 0}. "
+                            if candidate.content.parts and len(candidate.content.parts) > 0:
+                                part = candidate.content.parts[0]
+                                if hasattr(part, 'text'):
+                                    text_preview = str(getattr(part, 'text', ''))[:100]
+                                    error_details += f"First part text: '{text_preview}'"
+            else:
+                # If it's not the expected structure, show the type
+                error_details += f"Response type: {type(response_obj_call).__name__}"
+            
+            raise ValueError(error_details)
         return JSONResponse(content=convert_to_openai_format(response_obj_call, request_obj.model))
