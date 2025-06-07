@@ -349,32 +349,74 @@ class DirectVertexClient:
                     error_msg = error_data.get("error", {}).get("message", f"HTTP {response.status}") if isinstance(error_data, dict) else str(error_data)
                     raise Exception(f"Vertex AI API error: {error_msg}")
                 
-                # The Vertex AI streaming endpoint returns Server-Sent Events
-                # We need to parse these and yield them as objects
+                # The Vertex AI streaming endpoint returns JSON array elements
+                # We need to parse these as they arrive
                 buffer = ""
+                
                 async for chunk in response.content.iter_any():
-                    buffer += chunk.decode('utf-8')
+                    decoded_chunk = chunk.decode('utf-8')
+                    buffer += decoded_chunk
                     
-                    # Process complete SSE messages
-                    while '\n\n' in buffer:
-                        message, buffer = buffer.split('\n\n', 1)
+                    # Try to extract complete JSON objects from the buffer
+                    while True:
+                        # Skip whitespace and array brackets
+                        buffer = buffer.lstrip()
+                        if buffer.startswith('['):
+                            buffer = buffer[1:].lstrip()
+                            continue
+                        if buffer.startswith(']'):
+                            # End of array
+                            return
                         
-                        if not message.strip():
+                        # Skip comma and whitespace between objects
+                        if buffer.startswith(','):
+                            buffer = buffer[1:].lstrip()
                             continue
                         
-                        # Parse SSE format
-                        if message.startswith('data: '):
-                            data_str = message[6:]
+                        # Look for a complete JSON object
+                        if buffer.startswith('{'):
+                            # Find the matching closing brace
+                            brace_count = 0
+                            in_string = False
+                            escape_next = False
                             
-                            if data_str.strip() == '[DONE]':
-                                return
-                            
-                            try:
-                                # Parse JSON and convert to object
-                                chunk_data = json.loads(data_str)
-                                yield self._dict_to_obj(chunk_data)
-                            except json.JSONDecodeError:
-                                continue
+                            for i, char in enumerate(buffer):
+                                if escape_next:
+                                    escape_next = False
+                                    continue
+                                
+                                if char == '\\' and in_string:
+                                    escape_next = True
+                                    continue
+                                
+                                if char == '"' and not in_string:
+                                    in_string = True
+                                elif char == '"' and in_string:
+                                    in_string = False
+                                elif char == '{' and not in_string:
+                                    brace_count += 1
+                                elif char == '}' and not in_string:
+                                    brace_count -= 1
+                                    
+                                    if brace_count == 0:
+                                        # Found complete object
+                                        obj_str = buffer[:i+1]
+                                        buffer = buffer[i+1:]
+                                        
+                                        try:
+                                            chunk_data = json.loads(obj_str)
+                                            converted_obj = self._dict_to_obj(chunk_data)
+                                            yield converted_obj
+                                        except json.JSONDecodeError as e:
+                                            print(f"ERROR: DirectVertexClient - Failed to parse JSON: {e}")
+                                        
+                                        break
+                            else:
+                                # No complete object found, need more data
+                                break
+                        else:
+                            # No more objects to process in current buffer
+                            break
                             
         except Exception as e:
             print(f"ERROR: Direct Vertex streaming API call failed: {e}")

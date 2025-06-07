@@ -241,7 +241,7 @@ def parse_gemini_response_for_reasoning_and_content(gemini_response_candidate: A
                 reasoning_text_parts.append(part_text)
             else:
                 normal_text_parts.append(part_text)
-    if candidate_part_text: # Candidate had text but no parts and was not a thought itself
+    elif candidate_part_text: # Candidate had text but no parts and was not a thought itself
         normal_text_parts.append(candidate_part_text)
     # If no parts and no direct text on candidate, both lists remain empty.
     
@@ -291,10 +291,14 @@ def convert_to_openai_format(gemini_response: Any, model: str) -> Dict[str, Any]
 def convert_chunk_to_openai(chunk: Any, model: str, response_id: str, candidate_index: int = 0) -> str:
     is_encrypt_full = model.endswith("-encrypt-full")
     delta_payload = {}
-    finish_reason = None 
+    finish_reason = None
 
     if hasattr(chunk, 'candidates') and chunk.candidates:
-        candidate = chunk.candidates[0] 
+        candidate = chunk.candidates[0]
+        
+        # Check for finish reason
+        if hasattr(candidate, 'finishReason') and candidate.finishReason:
+            finish_reason = "stop"  # Convert Gemini finish reasons to OpenAI format
         
         # For a streaming chunk, candidate might be simpler, or might have candidate.content with parts.
         # parse_gemini_response_for_reasoning_and_content is designed to handle both candidate and candidate.content
@@ -307,7 +311,6 @@ def convert_chunk_to_openai(chunk: Any, model: str, response_id: str, candidate_
         if reasoning_text: delta_payload['reasoning_content'] = reasoning_text
         if normal_text or (not reasoning_text and not delta_payload): # Ensure content key if nothing else
             delta_payload['content'] = normal_text if normal_text else ""
-
 
     chunk_data = {
         "id": response_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": model,
