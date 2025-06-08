@@ -116,8 +116,8 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                 if key_tuple:
                     original_idx, key_val = key_tuple
                     try:
-                        # Check if model contains "gemini-2.5-pro" for direct URL approach
-                        if "gemini-2.5-pro" in base_model_name:
+                        # Check if model contains "gemini-2.5-pro" or "gemini-2.5-flash" for direct URL approach
+                        if "gemini-2.5-pro" in base_model_name or "gemini-2.5-flash" in base_model_name:
                             client_to_use = DirectVertexClient(api_key=key_val)
                             await client_to_use.discover_project_id()
                             print(f"INFO: Attempt {attempt+1}/{total_keys} - Using DirectVertexClient for model {request.model} (base: {base_model_name}) with API key (original index: {original_idx}).")
